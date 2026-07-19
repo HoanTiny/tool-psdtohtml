@@ -1,0 +1,33 @@
+# ===== KHONG day len git =====
+
+# Python venv + cache (nang, tao lai duoc bang: python -m venv venv)
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+dist/
+.next/
+npm-debug.log*
+
+# File PSD nguon (RAT NANG, GitHub chan file >100MB) - luu rieng, khong day len
+*.psd
+
+# Ket qua sinh tu dong (tao lai duoc tu PSD bang CLI)
+output/
+output_*/
+_mobile/
+
+# Secret / env
+.env
+.env.*
+*.key
+*.pem
+
+# He dieu hanh / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
