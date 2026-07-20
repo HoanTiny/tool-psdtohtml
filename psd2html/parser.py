@@ -28,6 +28,7 @@ Moi {layer}:
 """
 
 import json
+import os
 from pathlib import Path
 
 from PIL import Image
@@ -35,6 +36,22 @@ from psd_tools import PSDImage
 from psd_tools.api.layers import Artboard
 
 from .sectionize import is_background
+
+# Dinh dang xuat asset: WEBP nhe hon PNG ~85-95% cho anh landing (giam giat khi tai).
+# Doi ve "png" qua bien moi truong PSD2HTML_ASSET_FMT=png neu can trong suot khong mat.
+ASSET_FMT = os.environ.get("PSD2HTML_ASSET_FMT", "webp").lower()
+WEBP_QUALITY = int(os.environ.get("PSD2HTML_WEBP_QUALITY", "85"))
+
+
+def _save_asset(img, assets_dir, lid):
+    """Luu asset theo dinh dang cau hinh (webp mac dinh). Tra ve ten file (vd L3.webp)."""
+    if ASSET_FMT == "png":
+        name = f"{lid}.png"
+        img.save(assets_dir / name)
+    else:
+        name = f"{lid}.webp"
+        img.save(assets_dir / name, "WEBP", quality=WEBP_QUALITY, method=4)
+    return name
 
 
 def _overlay_ids(psd):
@@ -251,20 +268,38 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
             except Exception:
                 export_img = img
 
-        # Xuat PNG cho MOI layer ve duoc (ke ca layer chu)
+        # CLIP layer ve trong khung canvas. Layer PSD thuong VE LAN ra ngoai
+        # canvas (bleed) - composite/screenshot da tu cat, nhung asset PNG xuat
+        # rieng thi giu nguyen kich thuoc day du + bbox tran. Neu khong cat, khi
+        # dat lai theo bbox, layer se tran sang vung khac (nghiem trong khi GHEP
+        # NHIEU section: layer section tren de len section duoi). Ta cat ca asset
+        # lan bbox ve phan giao voi canvas cho khop voi screenshot.
+        orig_b = dict(node["bbox"])
+        if export_img is not None and cw and ch:
+            bx, by, bw, bh = orig_b["x"], orig_b["y"], orig_b["width"], orig_b["height"]
+            ix0, iy0 = max(0, bx), max(0, by)
+            ix1, iy1 = min(cw, bx + bw), min(ch, by + bh)
+            if ix1 <= ix0 or iy1 <= iy0:
+                export_img = None  # layer nam hoan toan ngoai canvas -> bo
+            elif (ix0, iy0, ix1, iy1) != (bx, by, bx + bw, by + bh):
+                try:
+                    export_img = export_img.crop((ix0 - bx, iy0 - by, ix1 - bx, iy1 - by))
+                    node["bbox"] = {"x": ix0, "y": iy0, "width": ix1 - ix0, "height": iy1 - iy0}
+                except Exception:
+                    pass
+
+        # Xuat asset cho MOI layer ve duoc (ke ca layer chu) - mac dinh WebP.
         if export_img is not None:
             try:
-                asset_path = assets_dir / f"{lid}.png"
-                export_img.save(asset_path)
-                node["asset"] = f"assets/{lid}.png"
+                name = _save_asset(export_img, assets_dir, lid)
+                node["asset"] = f"assets/{name}"
             except Exception:
                 pass
 
-        # Ghep vao canvas du phong (theo dung thu tu ve tu duoi len)
+        # Ghep vao canvas du phong (dung toa do GOC; PIL tu cat o canh canvas)
         if canvas is not None and img is not None:
             try:
-                b = node["bbox"]
-                canvas.paste(img.convert("RGBA"), (b["x"], b["y"]), img.convert("RGBA"))
+                canvas.paste(img.convert("RGBA"), (orig_b["x"], orig_b["y"]), img.convert("RGBA"))
             except Exception:
                 pass
 

@@ -278,11 +278,13 @@ def _split_sections(board, layout):
     board["backgrounds"] = bg
 
     try:
-        bands = [(s["y0"], s["y1"]) for s in split_sections(layout)]
+        secs = split_sections(layout)
+        bands = [(s["y0"], s["y1"]) for s in secs]
+        band_names = [s.get("name") for s in secs]
     except Exception:
-        bands = [(0, H)]
+        bands, band_names = [(0, H)], [None]
     if not bands:
-        bands = [(0, H)]
+        bands, band_names = [(0, H)], [None]
 
     reps = board["repeats"]
     rep_band = {}
@@ -296,7 +298,17 @@ def _split_sections(board, layout):
         sreps = [reps[j] for j in rep_band if y0 <= rep_band[j] < y1]
         if not sflat and not sreps:
             continue
-        name = _section_name(sflat, W, H, y0, y1, len(sections), used)
+        # Uu tien ten section chia san tu file PSD (merge.py); khong thi doan tieu de.
+        explicit = band_names[i] if i < len(band_names) else None
+        if explicit:
+            base = _pascal(explicit)[:24] or f"Section{len(sections) + 1}"
+            name, k = base, 1
+            while name in used:
+                k += 1
+                name = f"{base}{k}"
+            used.add(name)
+        else:
+            name = _section_name(sflat, W, H, y0, y1, len(sections), used)
         sections.append({"comp": name, "flat": sflat, "repeats": sreps, "y0": y0})
     # repeat chua gan (hiem) -> section dau
     assigned = {rp["comp"] for s in sections for rp in s["repeats"]}
@@ -309,11 +321,25 @@ def _split_sections(board, layout):
     board["sections"] = sections
 
 
-def _artboards_from_layout(layout, asset_dir="assets", comp_prefix=""):
+def _artboards_from_layout(layout, asset_dir="assets", comp_prefix="", extra_exclude=None,
+                           detect_repeats=False):
     cw, ch = layout["canvas"]["width"], layout["canvas"]["height"]
+    # Loai cac layer da dua vao FixedNav (nav/logo lap) NGAY TU DAU - truoc ca
+    # buoc phat hien cum lap. Neu khong, nav se bi nhan nham la 'cum lap' va sinh
+    # component lap render nav o moi section (lap lai dung cai da fixed).
+    if extra_exclude:
+        exset = set(extra_exclude)
+        layout = dict(layout)
+        layout["layers"] = [l for l in layout["layers"] if l["id"] not in exset]
     by_id, children = _index(layout)
     ab = {"x": 0, "y": 0, "width": cw, "height": ch}
-    repeats, consumed = _detect_repeats(layout, ab, by_id, children, asset_dir)
+    # MAC DINH render PHANG (moi layer dat tuyet doi = khop thiet ke nhu slices).
+    # Chi gom 'cum lap' (.map, API-ready) khi detect_repeats=True: voi landing dày
+    # do hoa, cac the/vat pham khac nhau hay bi gom nham -> meo/chong len nhau.
+    if detect_repeats:
+        repeats, consumed = _detect_repeats(layout, ab, by_id, children, asset_dir)
+    else:
+        repeats, consumed = [], set()
     menu_ids, toggle_id = _detect_menu(layout, ab, by_id, children)
     flat = _build_flat(layout["layers"], ab, consumed, asset_dir, menu_ids, toggle_id)
     stem = Path(layout.get("source", "Page")).stem
@@ -330,6 +356,9 @@ def _gen_types():
         "  id: string; src: string; x: number; y: number; w: number; h: number;\n"
         "  o: number; blend?: string | null; alt?: string;\n"
         "  href?: string | null; menu?: boolean; toggle?: boolean;\n}\n\n"
+        "export interface FixedItem {\n"
+        "  src: string; x: number; y: number; w: number; h: number;\n"
+        "  o: number; blend?: string | null; alt?: string; href?: string | null;\n}\n\n"
         "export interface SlotItem { src: string; x: number; y: number; w: number; h: number; alt?: string; }\n\n"
         "export interface RepeatItem {\n"
         "  id: number; x: number; y: number; claimed?: boolean;\n"
@@ -372,6 +401,56 @@ def _gen_stage(lang, client):
         "        {children}\n      </div>\n    </div>\n  );\n}\n")
 
 
+def _gen_fixednav(board, lang, client):
+    """Component thanh CO DINH (nav/logo): render 1 lan, position:fixed, tu co gian."""
+    head = '"use client";\n\n' if client else ""
+    W = board["W"]
+    data = json.dumps(board["fixed"], ensure_ascii=False, indent=2)
+    tpl = r'''import { useEffect, useState } from "react";
+__RIMP__
+const items__ITEMSANN__ = __DATA__;
+
+// Thanh dieu huong CO DINH - render 1 lan, tu co gian theo be rong man hinh.
+export default function FixedNav() {
+  const [scale, setScale] = useState(1);
+  useEffect(() => {
+    const fit = () => setScale(Math.min(1, window.innerWidth / __W__));
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, []);
+  return (
+    <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: 0, zIndex: 1000, pointerEvents: "none" }}>
+      <div style={{ position: "absolute", top: 0, left: 0, width: __W__, transformOrigin: "top left", transform: `scale(${scale})` }}>
+        {items.map((it, i) => {
+          const st__STYLEANN__ = { position: "absolute", left: it.x, top: it.y, width: it.w, height: it.h, opacity: it.o, mixBlendMode: (it.blend || undefined)__BLENDCAST__, pointerEvents: "auto" };
+          return it.href ? (
+            <a key={i} href={it.href} title={it.alt} style={st}>
+              <img src={it.src} alt={it.alt} style={{ width: "100%", height: "100%", display: "block" }} />
+            </a>
+          ) : (
+            <img key={i} src={it.src} alt={it.alt} style={st} />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+'''
+    if lang == "ts":
+        tpl = (tpl.replace("__RIMP__", 'import type React from "react";\n')
+               .replace("__ITEMSANN__", ": FixedItem[]")
+               .replace("__STYLEANN__", ": React.CSSProperties")
+               .replace("__BLENDCAST__", " as React.CSSProperties[\"mixBlendMode\"]"))
+        tpl = ('import type { FixedItem } from "../../types/landing";\n' + tpl)
+    else:
+        tpl = (tpl.replace("__RIMP__\n", "")
+               .replace("__ITEMSANN__", "").replace("__STYLEANN__", "")
+               .replace("__BLENDCAST__", ""))
+    tpl = tpl.replace("__DATA__", data).replace("__W__", str(W))
+    return head + tpl
+
+
 def _gen_layer(lang, client):
     head = '"use client";\n\n' if client else ""
     imp = 'import type { LayerItem } from "../../types/landing";\n\n' if lang == "ts" else ""
@@ -387,14 +466,14 @@ def _gen_layer(lang, client):
         "    return (\n"
         '      <button onClick={onToggleMenu} title={l.alt}\n'
         '        className="absolute block cursor-pointer transition hover:brightness-110" style={style}>\n'
-        '        <img src={l.src} alt={l.alt} className="block w-full h-full" />\n'
+        '        <img src={l.src} alt={l.alt} className="block w-full h-full" loading="lazy" decoding="async" />\n'
         "      </button>\n    );\n  }\n"
         "  if (l.menu && !menuOpen) return null;\n"
         "  return l.href ? (\n"
         '    <a href={l.href} title={l.alt} className="absolute block cursor-pointer transition hover:brightness-110" style={style}>\n'
-        '      <img src={l.src} alt={l.alt} className="block w-full h-full" />\n'
+        '      <img src={l.src} alt={l.alt} className="block w-full h-full" loading="lazy" decoding="async" />\n'
         "    </a>\n  ) : (\n"
-        '    <img src={l.src} alt={l.alt} className="absolute block" style={style} />\n  );\n}\n')
+        '    <img src={l.src} alt={l.alt} className="absolute block" style={style} loading="lazy" decoding="async" />\n  );\n}\n')
 
 
 def _flat_json(items):
@@ -421,7 +500,7 @@ def _gen_background(board, lang, client):
     return head + imp + decl + (
         "export default function Background() {\n  return (\n    <>\n"
         "      {bg.map((l) => (\n"
-        '        <img key={l.id} src={l.src} alt={l.alt} className="absolute block"\n'
+        '        <img key={l.id} src={l.src} alt={l.alt} className="absolute block" loading="lazy" decoding="async"\n'
         "          style={{ left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o }} />\n"
         "      ))}\n    </>\n  );\n}\n")
 
@@ -496,8 +575,11 @@ def _gen_section(sec, lang, client):
 def _gen_landing(board, lang, client, stage_rel="../Stage"):
     head = '"use client";\n\n' if client else ""
     comp = board["landing_name"]
+    has_fixed = bool(board.get("fixed"))
     imports = ['import { useState } from "react";', f'import Stage from "{stage_rel}";',
                'import Background from "./Background";']
+    if has_fixed:
+        imports.append('import FixedNav from "./FixedNav";')
     for sec in board["sections"]:
         imports.append(f'import {sec["comp"]} from "./{sec["comp"]}";')
     L = [head + "\n".join(imports) + "\n"]
@@ -508,11 +590,14 @@ def _gen_landing(board, lang, client, stage_rel="../Stage"):
     L.append("  const onToggleMenu = () => setMenuOpen((o) => !o);")
     L.append("  const props = { onClaim, menuOpen, onToggleMenu };")
     L.append("  return (")
-    L.append(f"    <Stage width={{{board['W']}}} height={{{board['H']}}}>")
-    L.append("      <Background />")
+    L.append("    <>")
+    if has_fixed:
+        L.append("      <FixedNav />")
+    L.append(f"      <Stage width={{{board['W']}}} height={{{board['H']}}}>")
+    L.append("        <Background />")
     for sec in board["sections"]:
-        L.append(f"      <{sec['comp']} {{...props}} />")
-    L += ["    </Stage>", "  );", "}", ""]
+        L.append(f"        <{sec['comp']} {{...props}} />")
+    L += ["      </Stage>", "    </>", "  );", "}", ""]
     return "\n".join(L)
 
 
@@ -556,6 +641,8 @@ def _write_landing_dir(base_dir, board, lang, client, stage_rel):
     ext = _ext(lang)
     (base_dir / f"Layer.{ext}").write_text(_gen_layer(lang, client), encoding="utf-8")
     (base_dir / f"Background.{ext}").write_text(_gen_background(board, lang, client), encoding="utf-8")
+    if board.get("fixed"):
+        (base_dir / f"FixedNav.{ext}").write_text(_gen_fixednav(board, lang, client), encoding="utf-8")
     for sec in board["sections"]:
         (base_dir / f"{sec['comp']}.{ext}").write_text(_gen_section(sec, lang, client), encoding="utf-8")
         for rp in sec["repeats"]:
@@ -711,10 +798,19 @@ def _dext(lang):
 
 # ================= entry =================
 
-def _load_variant(vdir, asset_dir, comp_prefix):
+def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False):
     vdir = Path(vdir)
     layout = json.loads((vdir / "layout.json").read_text(encoding="utf-8"))
-    board = _artboards_from_layout(layout, asset_dir, comp_prefix)
+    # Thanh CO DINH (nav/logo lap giua cac section) -> tach thanh FixedNav, render 1 lan.
+    from .fixed_overlay import detect_fixed_overlay
+    fixed_items, drop_ids = detect_fixed_overlay(vdir, layout)
+    board = _artboards_from_layout(layout, asset_dir, comp_prefix, extra_exclude=drop_ids,
+                                   detect_repeats=detect_repeats)
+    board["fixed"] = [{
+        "src": _src(it["asset"], asset_dir), "x": it["x"], "y": it["y"],
+        "w": it["w"], "h": it["h"], "o": it.get("o", 1), "blend": it.get("blend"),
+        "alt": it.get("alt", ""), "href": it.get("href"),
+    } for it in fixed_items]
     if not layout.get("artboards"):
         board["H"] = _content_bottom_from_image(
             vdir / layout.get("screenshot", "screenshot.png"), layout["canvas"]["height"])
@@ -722,14 +818,14 @@ def _load_variant(vdir, asset_dir, comp_prefix):
     return layout, board
 
 
-def export(out_dir, framework="react", lang="js", mobile_dir=None):
+def export(out_dir, framework="react", lang="js", mobile_dir=None, detect_repeats=False):
     out_dir = Path(out_dir)
     if lang not in ("ts", "js"):
         lang = "js"
-    layout, board = _load_variant(out_dir, "assets", "")
+    layout, board = _load_variant(out_dir, "assets", "", detect_repeats)
     mobile = None
     if mobile_dir:
-        m_layout, m_board = _load_variant(mobile_dir, "assets-m", "M")
+        m_layout, m_board = _load_variant(mobile_dir, "assets-m", "M", detect_repeats)
         mobile = {"dir": Path(mobile_dir), "layout": m_layout, "board": m_board}
 
     proj = _export_next(out_dir, layout, board, mobile, lang) if framework == "next" \
@@ -737,7 +833,9 @@ def export(out_dir, framework="react", lang="js", mobile_dir=None):
 
     nsec = len(board["sections"])
     nrep = sum(len(s["repeats"]) for s in board["sections"])
-    print(f"[{framework}/{lang}{' +mobile' if mobile else ''}] {nsec} section, {nrep} cum lap -> {proj}")
+    nfix = len(board.get("fixed", []))
+    print(f"[{framework}/{lang}{' +mobile' if mobile else ''}] {nsec} section, {nrep} cum lap"
+          + (f", {nfix} phan tu CO DINH (FixedNav)" if nfix else "") + f" -> {proj}")
     for s in board["sections"]:
         tag = " (" + ", ".join(rp["comp"] + f" x{rp['count']}" for rp in s["repeats"]) + ")" if s["repeats"] else ""
         print(f"    section {s['comp']}{tag}")

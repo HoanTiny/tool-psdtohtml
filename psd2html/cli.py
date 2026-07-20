@@ -12,23 +12,37 @@ import sys
 from pathlib import Path
 
 from .parser import parse_psd
+from .merge import parse_and_merge
 from .ai_convert import convert, convert_sectioned, DEFAULT_MODEL
 
 # Trang cao hon nguong nay -> tu dong cat theo section
 TALL_THRESHOLD = 2500
 
 
+def _parse_input(psd_list, out_dir, label="desktop"):
+    """1 file -> parse thuong; nhieu file -> moi file 1 section, ghep doc (merge)."""
+    if len(psd_list) == 1:
+        return parse_psd(psd_list[0], out_dir)
+    print(f"[{label}] {len(psd_list)} file PSD -> moi file 1 section, ghep doc theo ten file")
+    return parse_and_merge(psd_list, out_dir)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Chuyen file PSD thanh HTML/CSS.")
-    ap.add_argument("psd", help="Duong dan file .psd")
+    ap.add_argument("psd", nargs="+",
+                    help="File .psd. Nhieu file = moi file 1 SECTION, ghep doc theo ten file "
+                         "(vd: 01-hero.psd 02-features.psd 03-footer.psd)")
     ap.add_argument("-o", "--out", default="output", help="Thu muc xuat (mac dinh: output)")
     ap.add_argument("--parse-only", action="store_true",
                     help="Chi chay Pha 1 (parse PSD), khong goi AI")
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"Model Claude (mac dinh: {DEFAULT_MODEL})")
-    ap.add_argument("--mobile", default=None, metavar="PSD",
-                    help="File PSD ban mobile (chi dung voi --react/--next): sinh ban mobile rieng")
+    ap.add_argument("--mobile", default=None, nargs="*", metavar="PSD",
+                    help="File PSD ban mobile (chi dung voi --react/--next); nhieu file = ghep section")
     ap.add_argument("--lang", choices=["js", "ts"], default="js",
                     help="Ngon ngu khi xuat React/Next: js (mac dinh) hoac ts (TypeScript)")
+    ap.add_argument("--repeats", action="store_true",
+                    help="React/Next: gom 'cum lap' thanh component .map() (API-ready). "
+                         "Mac dinh TAT (render phang, khop thiet ke hon cho landing do hoa).")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--slices", action="store_true",
                       help="Cat anh truc tiep (pixel-perfect, KHONG dung AI) - hop landing nhieu do hoa")
@@ -41,7 +55,7 @@ def main():
     args = ap.parse_args()
 
     print("=== Pha 1: Parse PSD ===")
-    layout_path = parse_psd(args.psd, args.out)
+    layout_path = _parse_input(args.psd, args.out)
 
     if args.parse_only:
         print("\nDa xong Pha 1. Bo qua AI (--parse-only).")
@@ -60,12 +74,13 @@ def main():
         fw = "next" if args.nextjs else "react"
         mobile_dir = None
         if args.mobile:
-            print(f"\n=== Parse PSD mobile: {args.mobile} ===")
+            print(f"\n=== Parse PSD mobile ({len(args.mobile)} file) ===")
             mobile_dir = str(Path(args.out) / "_mobile")
-            parse_psd(args.mobile, mobile_dir)
+            _parse_input(args.mobile, mobile_dir, label="mobile")
         print(f"\n=== Xuat du an {fw.upper()}/{args.lang} (khong dung AI) ===")
         from .export_web import export
-        proj = export(args.out, framework=fw, lang=args.lang, mobile_dir=mobile_dir)
+        proj = export(args.out, framework=fw, lang=args.lang, mobile_dir=mobile_dir,
+                      detect_repeats=args.repeats)
         print(f"\nHOAN TAT -> {proj}")
         return
 

@@ -18,15 +18,37 @@ from flask import Flask, request, jsonify, send_from_directory, send_file, abort
 from werkzeug.utils import secure_filename
 
 from .parser import parse_psd
+from .merge import parse_and_merge
 from .render_slices import render as render_slices
 from .export_web import export as export_web
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 800 * 1024 * 1024  # cho phep PSD nang toi 800MB
+# Cho phep tong upload rat nang (nhieu PSD section, moi file co the vai tram MB).
+# 6GB - dieu chinh qua bien moi truong PSD2HTML_MAX_MB neu can.
+import os as _os
+_max_mb = int(_os.environ.get("PSD2HTML_MAX_MB", "6144"))
+app.config["MAX_CONTENT_LENGTH"] = _max_mb * 1024 * 1024
 
 BASE = Path(__file__).resolve().parent.parent
 JOBS_DIR = BASE / "output_web"
 JOBS_DIR.mkdir(exist_ok=True)
+
+
+# LUON tra JSON khi loi (thay vi trang HTML) de frontend hien duoc thong bao.
+@app.errorhandler(413)
+def _too_large(e):
+    return jsonify({"error": f"File qua lon (vuot {_max_mb}MB tong). "
+                             "Tang bien moi truong PSD2HTML_MAX_MB roi chay lai."}), 413
+
+
+@app.errorhandler(400)
+def _bad_request(e):
+    return jsonify({"error": f"Yeu cau khong hop le: {getattr(e, 'description', e)}"}), 400
+
+
+@app.errorhandler(500)
+def _server_error(e):
+    return jsonify({"error": f"Loi server: {getattr(e, 'description', e)}"}), 500
 
 jobs = {}          # job_id -> {status, step, error, format, preview, download, files}
 _counter = [0]
@@ -37,18 +59,28 @@ def _new_job_id():
     return f"job{_counter[0]}"
 
 
-def _run(job_id, desktop_psd, mobile_psd, fmt, lang="js"):
+def _parse_input(psd_list, out_dir):
+    """1 file -> parse thuong; nhieu file -> moi file 1 section, ghep doc."""
+    if len(psd_list) == 1:
+        return parse_psd(str(psd_list[0]), str(out_dir))
+    return parse_and_merge([str(p) for p in psd_list], str(out_dir))
+
+
+def _run(job_id, desktop_psds, mobile_psds, fmt, lang="js"):
     job = jobs[job_id]
     out = JOBS_DIR / job_id / "out"
+    if out.exists():                       # don ket qua cu (tranh lan file section cu)
+        shutil.rmtree(out, ignore_errors=True)
     try:
-        job["step"] = "Doc PSD desktop..."
-        parse_psd(str(desktop_psd), str(out))
+        n = len(desktop_psds)
+        job["step"] = f"Doc PSD desktop ({n} section)..." if n > 1 else "Doc PSD desktop..."
+        _parse_input(desktop_psds, out)
 
         mobile_dir = None
-        if mobile_psd:
+        if mobile_psds:
             job["step"] = "Doc PSD mobile..."
             mobile_dir = out / "_mobile"
-            parse_psd(str(mobile_psd), str(mobile_dir))
+            _parse_input(mobile_psds, mobile_dir)
 
         job["step"] = "Sinh code..."
         if fmt == "slices":
@@ -97,10 +129,32 @@ def _make_zip(src, zip_path, include=None):
                             zf.write(p, p.relative_to(src))
 
 
+def _save_uploads(files, jdir, prefix):
+    """
+    Luu cac file upload vao thu muc con rieng (desktop/ hoac mobile/), GIU TEN GOC
+    de buoc merge dat ten section sach (01-hero.psd -> 'hero'). Sort theo ten file.
+    """
+    sub = jdir / prefix
+    sub.mkdir(parents=True, exist_ok=True)
+    files = sorted([f for f in files if f and f.filename], key=lambda f: f.filename.lower())
+    saved, used = [], set()
+    for i, f in enumerate(files):
+        name = secure_filename(f.filename) or f"section{i:02d}.psd"
+        if name in used:                       # tranh trung ten (hiem)
+            name = f"{i:02d}_{name}"
+        used.add(name)
+        path = sub / name
+        f.save(path)
+        saved.append(path)
+    return saved
+
+
 @app.route("/convert", methods=["POST"])
 def convert():
-    desktop = request.files.get("desktop")
-    if not desktop or not desktop.filename:
+    # Nhan NHIEU file: moi file = 1 section (ghep doc). 1 file = nhu cu.
+    desktops = request.files.getlist("desktop")
+    desktops = [f for f in desktops if f and f.filename]
+    if not desktops:
         return jsonify({"error": "Chua chon file PSD desktop"}), 400
     fmt = request.form.get("format", "slices")
     if fmt not in ("slices", "react", "next"):
@@ -113,18 +167,13 @@ def convert():
     jdir = JOBS_DIR / job_id
     jdir.mkdir(parents=True, exist_ok=True)
 
-    d_path = jdir / secure_filename(desktop.filename)
-    desktop.save(d_path)
-
-    m_path = None
-    mobile = request.files.get("mobile")
-    if mobile and mobile.filename:
-        m_path = jdir / secure_filename(mobile.filename)
-        mobile.save(m_path)
+    d_paths = _save_uploads(desktops, jdir, "d")
+    m_paths = _save_uploads(request.files.getlist("mobile"), jdir, "m")
 
     jobs[job_id] = {"status": "running", "step": "Bat dau...", "format": fmt, "lang": lang,
+                    "sections": len(d_paths),
                     "error": None, "preview": None, "download": None, "files": []}
-    threading.Thread(target=_run, args=(job_id, d_path, m_path, fmt, lang), daemon=True).start()
+    threading.Thread(target=_run, args=(job_id, d_paths, m_paths, fmt, lang), daemon=True).start()
     return jsonify({"job_id": job_id})
 
 
@@ -192,20 +241,22 @@ INDEX_HTML = """<!doctype html>
 </style></head><body>
 <div class="wrap">
   <h1>🎨 psd2html</h1>
-  <p class="sub">Keo file PSD vao, chon dinh dang, bam Chuyen doi. Khong can go lenh.</p>
+  <p class="sub">Keo file PSD vao, chon dinh dang, bam Chuyen doi. Khong can go lenh.<br>
+    <b style="color:#93c5fd">Nhieu file = moi file 1 section</b>, ghep doc theo <b>thu tu ten file</b>
+    (vd: 01-hero.psd, 02-features.psd, 03-footer.psd).</p>
 
   <div class="grid">
     <div class="drop" id="dropD">
       <div class="big">📄 Keo tha PSD <b>Desktop</b></div>
-      <small>hoac bam de chon file (.psd)</small>
+      <small>1 file, hoac nhieu file (moi file 1 section)</small>
       <div class="fname" id="nameD"></div>
-      <input type="file" id="fileD" accept=".psd" hidden>
+      <input type="file" id="fileD" accept=".psd" multiple hidden>
     </div>
     <div class="drop" id="dropM">
       <div class="big">📱 Keo tha PSD <b>Mobile</b></div>
-      <small>tuy chon - de trong neu khong co</small>
+      <small>tuy chon - 1 hoac nhieu file</small>
       <div class="fname" id="nameM"></div>
-      <input type="file" id="fileM" accept=".psd" hidden>
+      <input type="file" id="fileM" accept=".psd" multiple hidden>
     </div>
   </div>
 
@@ -238,17 +289,26 @@ INDEX_HTML = """<!doctype html>
   </div>
 </div>
 <script>
-let fileD=null, fileM=null;
-function setupDrop(dropId, inputId, nameId, set){
+let filesD=[], filesM=[];
+// Hien danh sach file THEO THU TU ten (dung thu tu se ghep section).
+function showList(nameEl, arr){
+  if(!arr.length){ nameEl.innerHTML=""; return; }
+  const sorted=[...arr].sort((a,b)=>a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  if(sorted.length===1){ nameEl.textContent="✓ "+sorted[0].name; return; }
+  nameEl.innerHTML="✓ "+sorted.length+" section:<br>"
+    + sorted.map((f,i)=>(i+1)+". "+f.name).join("<br>");
+}
+function setupDrop(dropId, inputId, nameId, get, set){
   const drop=document.getElementById(dropId), input=document.getElementById(inputId), name=document.getElementById(nameId);
   drop.onclick=()=>input.click();
-  input.onchange=()=>{ if(input.files[0]){ set(input.files[0]); name.textContent="✓ "+input.files[0].name; } };
+  input.onchange=()=>{ if(input.files.length){ set([...input.files]); showList(name,get()); } };
   ["dragover","dragenter"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add("over")}));
   ["dragleave","drop"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove("over")}));
-  drop.addEventListener("drop",ev=>{ const f=ev.dataTransfer.files[0]; if(f){ set(f); name.textContent="✓ "+f.name; }});
+  drop.addEventListener("drop",ev=>{ const fs=[...ev.dataTransfer.files].filter(f=>/\.psd$/i.test(f.name));
+    if(fs.length){ set(fs); showList(name,get()); }});
 }
-setupDrop("dropD","fileD","nameD",f=>fileD=f);
-setupDrop("dropM","fileM","nameM",f=>fileM=f);
+setupDrop("dropD","fileD","nameD",()=>filesD,a=>filesD=a);
+setupDrop("dropM","fileM","nameM",()=>filesM,a=>filesM=a);
 
 // hien bo chon ngon ngu khi chon React/Next
 document.querySelectorAll('input[name=fmt]').forEach(r=>r.addEventListener('change',()=>{
@@ -260,13 +320,27 @@ const panel=document.getElementById("panel"), stepEl=document.getElementById("st
       progress=document.getElementById("progress"), result=document.getElementById("result"), go=document.getElementById("go");
 
 go.onclick=async()=>{
-  if(!fileD){ alert("Hay chon file PSD desktop truoc"); return; }
+  if(!filesD.length){ alert("Hay chon file PSD desktop truoc"); return; }
   const fmt=document.querySelector('input[name=fmt]:checked').value;
   const lang=(document.querySelector('input[name=lang]:checked')||{}).value||'js';
-  const fd=new FormData(); fd.append("desktop",fileD); if(fileM) fd.append("mobile",fileM); fd.append("format",fmt); fd.append("lang",lang);
+  const fd=new FormData();
+  filesD.forEach(f=>fd.append("desktop",f));
+  filesM.forEach(f=>fd.append("mobile",f));
+  fd.append("format",fmt); fd.append("lang",lang);
   go.disabled=true; panel.classList.add("show"); progress.style.display="block"; result.style.display="none"; stepEl.textContent="Tai file len...";
   let r;
-  try{ r=await (await fetch("/convert",{method:"POST",body:fd})).json(); }
+  try{
+    const resp=await fetch("/convert",{method:"POST",body:fd});
+    const ct=resp.headers.get("content-type")||"";
+    if(ct.includes("application/json")){ r=await resp.json(); }
+    else{
+      // Server tra HTML (thuong la loi tang duoi: 413 file qua lon, 500...).
+      const txt=await resp.text();
+      stepEl.textContent="Loi "+resp.status+" "+resp.statusText+": "
+        +(txt.replace(/<[^>]*>/g,"").trim().slice(0,200)||"server khong tra JSON");
+      go.disabled=false; return;
+    }
+  }
   catch(e){ stepEl.textContent="Loi tai len: "+e; go.disabled=false; return; }
   if(r.error){ stepEl.textContent="Loi: "+r.error; go.disabled=false; return; }
   poll(r.job_id);

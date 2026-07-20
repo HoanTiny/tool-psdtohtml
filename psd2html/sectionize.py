@@ -37,6 +37,43 @@ def is_background(layer, canvas_w, canvas_h):
     )
 
 
+def _sections_from_bands(layout, bands):
+    """
+    Tao section tu ranh gioi TUONG MINH (bands = [{name, y0, y1}, ...]).
+    Dung khi moi section la 1 file PSD rieng (xem merge.py) - khong can doan gap.
+    Giu nguyen dinh dang tra ve nhu split_sections de downstream dung chung.
+    """
+    canvas_w = layout["canvas"]["width"]
+    canvas_h = layout["canvas"]["height"]
+    leaves = _leaf_layers(layout)
+    backgrounds, content = [], []
+    for l in leaves:
+        (backgrounds if is_background(l, canvas_w, canvas_h) else content).append(l)
+
+    sections = []
+    for band in bands:
+        y0, y1 = band["y0"], band["y1"]
+        sec_layers = []
+        for l in content:
+            cy = l["bbox"]["y"] + l["bbox"]["height"] / 2
+            if y0 <= cy < y1:
+                nl = dict(l)
+                nb = dict(l["bbox"])
+                nb["y"] = nb["y"] - y0  # doi toa do ve goc section
+                nl["bbox"] = nb
+                sec_layers.append(nl)
+        sections.append({
+            "index": len(sections),
+            "y0": y0,
+            "y1": y1,
+            "height": y1 - y0,
+            "name": band.get("name"),
+            "layers": sec_layers,
+            "backgrounds": backgrounds,
+        })
+    return sections
+
+
 def split_sections(layout, target_h=1300, min_gap=25, bg_ratio=0.6):
     """
     Tra ve danh sach section, moi section:
@@ -44,6 +81,7 @@ def split_sections(layout, target_h=1300, min_gap=25, bg_ratio=0.6):
         "index": 0,
         "y0": 0, "y1": 1236,          # toa do tren trang goc
         "height": 1236,
+        "name": "hero" | None,        # ten section (neu chia san tu file)
         "layers": [ ... ],            # layer thuoc section (toa do y da doi ve goc section)
         "backgrounds": [ ... ],       # layer nen cao toan trang (dung chung)
       }
@@ -51,7 +89,14 @@ def split_sections(layout, target_h=1300, min_gap=25, bg_ratio=0.6):
     target_h : chieu cao mong muon moi section (px) - dung de gop gap nho.
     min_gap  : dai toi thieu cua 1 dai trong de tinh la ranh gioi.
     bg_ratio : layer cao hon ty le nay so voi trang -> coi la nen toan trang.
+
+    Neu layout co field "sections" (moi section = 1 file PSD, xem merge.py) thi
+    DUNG DUNG ranh gioi do - khong doan gap nua.
     """
+    explicit = layout.get("sections")
+    if explicit:
+        return _sections_from_bands(layout, explicit)
+
     canvas_h = layout["canvas"]["height"]
     leaves = _leaf_layers(layout)
 
@@ -111,6 +156,7 @@ def split_sections(layout, target_h=1300, min_gap=25, bg_ratio=0.6):
             "y0": y0,
             "y1": y1,
             "height": y1 - y0,
+            "name": None,
             "layers": sec_layers,
             "backgrounds": backgrounds,
         })

@@ -29,6 +29,32 @@ venv\Scripts\python.exe -m psd2html.webapp
 ```
 Mở **http://localhost:5000** → kéo file PSD (desktop + tuỳ chọn mobile) → chọn định dạng (HTML / React / Next) → bấm **Chuyển đổi** → xem preview (HTML) và tải ZIP kết quả.
 
+## Nhiều PSD — mỗi file 1 section (mới)
+
+Nếu design gửi **mỗi section 1 file PSD riêng** (thay vì 1 file cả trang), truyền nhiều file cùng lúc — tool tự **ghép dọc theo thứ tự tên file**:
+
+```powershell
+venv\Scripts\python.exe -m psd2html.cli 01-hero.psd 02-features.psd 03-footer.psd -o output --react
+```
+
+Trên **web UI**: kéo/chọn nhiều file `.psd` vào ô Desktop (và Mobile nếu có) — danh sách hiện theo đúng thứ tự ghép.
+
+- **Thứ tự = tên file.** Đặt tên có số đầu: `01-hero.psd`, `02-features.psd`... Phần tên sau số (`hero`, `features`) thành **tên component** luôn (`Hero.jsx`, `Features.jsx`).
+- **Ranh giới section chính xác 100%** do người chia — không còn đoán gap như file gộp (xem `sectionize.py`).
+- **Assets tách riêng** theo section (`s0_*`, `s1_*`...) nên không đè tên nhau.
+- Section hẹp hơn được **căn giữa** trong canvas (rộng = section rộng nhất).
+- Dùng được với mọi chế độ (`--slices`, `--react`, `--next`, AI). Truyền **1 file** → chạy y như cũ.
+- `--mobile` cũng nhận nhiều file: `--mobile 01-hero-m.psd 02-features-m.psd`.
+
+**Cắt layer theo khung (clip):** layer PSD hay vẽ lấn ra ngoài canvas (bleed). Parser tự **cắt asset + bbox về đúng khung** — nếu không, phần tràn của section trên sẽ đè xuống section dưới khi ghép (xem `parser.py`).
+
+**Thanh cố định (fixed nav):** phần lặp ở mọi section (logo + menu dọc + icon chuột) được **tự phát hiện** (gom cụm theo vị trí tương đối + so ảnh aHash, đã loại nền) rồi **render 1 lần** dạng `position:fixed` thay vì lặp mỗi section — slices dùng overlay riêng, React/Next sinh component `FixedNav` (xem `fixed_overlay.py`).
+
+**Tối ưu hiệu năng (tự động):**
+- **WebP**: asset xuất dạng `.webp` (quality 85) thay vì PNG → nhẹ hơn ~90% (vd 42MB → ~4MB), tải + giải mã nhanh, đỡ giật. Đổi lại PNG: đặt `PSD2HTML_ASSET_FMT=png`; chỉnh chất lượng: `PSD2HTML_WEBP_QUALITY=90`.
+- **Lazy-load**: ảnh ngoài màn hình chỉ tải khi cuộn tới (`loading=lazy` + `decoding=async`); section đầu tải ngay để không nháy. Áp cho cả slices lẫn React/Next.
+- **content-visibility** (slices): mỗi section là 1 lớp riêng, trình duyệt bỏ qua render section ngoài màn hình → cuộn mượt hơn.
+
 ## 3 chế độ chuyển
 
 | Chế độ | Lệnh | Khi nào dùng | AI? |
@@ -64,7 +90,7 @@ src/components/
 src/types/landing.ts   # (TS)
 ``` Tailwind cho class tiện ích, component `Stage` tự co giãn responsive. **Nhiều artboard** trong 1 PSD → mỗi artboard thành 1 component (React) / 1 route (Next).
 
-**Tự động componentize group lặp (API-ready):** các cụm lặp (7 thẻ điểm danh, 3 gói nạp...) được tự phát hiện và sinh thành 1 component render bằng `.map()` qua mảng data:
+**Componentize group lặp (API-ready) — tuỳ chọn `--repeats`:** MẶC ĐỊNH render **phẳng** (mỗi layer đặt tuyệt đối, khớp thiết kế 100% như slices) vì với landing dày đồ hoạ, các thẻ/vật phẩm khác nhau hay bị gom nhầm thành "cụm lặp" → méo/chồng lên nhau. Bật `--repeats` khi bạn muốn các cụm lặp (7 thẻ điểm danh, 3 gói nạp...) được tự phát hiện và sinh thành 1 component render bằng `.map()` qua mảng data:
 - Mỗi phần tử: `{ id, x, y, sN (ảnh khác nhau như "Ngày 1"), claimed, items }` — thay bằng data từ BE.
 - Nút "Nhận Quà" gọi `onClaim(id)` — cắm API claim vào đây.
 - Ô vật phẩm: `item.items = [{src, x, y, w, h}]` do BE trả về.
@@ -125,7 +151,9 @@ venv\Scripts\python.exe -m psd2html.cli duong_dan.psd --model claude-opus-4-8
 | File | Vai trò |
 |------|---------|
 | `psd2html/parser.py` | Pha 1 — đọc PSD, xuất JSON + assets + screenshot |
-| `psd2html/sectionize.py` | Cắt trang cao thành section + phân loại layer nền |
+| `psd2html/merge.py` | Ghép nhiều PSD (mỗi file 1 section) thành 1 layout |
+| `psd2html/fixed_overlay.py` | Phát hiện phần lặp giữa các section (nav/logo) → render 1 lần dạng fixed |
+| `psd2html/sectionize.py` | Cắt trang cao thành section + phân loại layer nền (ưu tiên ranh giới có sẵn) |
 | `psd2html/ai_convert.py` | Pha 2 — gửi Claude, nhận HTML/CSS (one-shot & theo section) |
 | `psd2html/cli.py` | Nối 2 pha, chạy từ dòng lệnh |
 | `make_sample_psd.py` | Sinh PSD mẫu để test (cần `pytoshop`) |
