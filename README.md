@@ -22,6 +22,13 @@ python -m venv venv
 venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+## Giao diện web kéo-thả (không cần gõ lệnh)
+
+```powershell
+venv\Scripts\python.exe -m psd2html.webapp
+```
+Mở **http://localhost:5000** → kéo file PSD (desktop + tuỳ chọn mobile) → chọn định dạng (HTML / React / Next) → bấm **Chuyển đổi** → xem preview (HTML) và tải ZIP kết quả.
+
 ## 3 chế độ chuyển
 
 | Chế độ | Lệnh | Khi nào dùng | AI? |
