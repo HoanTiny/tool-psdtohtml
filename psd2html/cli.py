@@ -27,6 +27,8 @@ def main():
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"Model Claude (mac dinh: {DEFAULT_MODEL})")
     ap.add_argument("--mobile", default=None, metavar="PSD",
                     help="File PSD ban mobile (chi dung voi --react/--next): sinh ban mobile rieng")
+    ap.add_argument("--lang", choices=["js", "ts"], default="js",
+                    help="Ngon ngu khi xuat React/Next: js (mac dinh) hoac ts (TypeScript)")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--slices", action="store_true",
                       help="Cat anh truc tiep (pixel-perfect, KHONG dung AI) - hop landing nhieu do hoa")
@@ -61,9 +63,9 @@ def main():
             print(f"\n=== Parse PSD mobile: {args.mobile} ===")
             mobile_dir = str(Path(args.out) / "_mobile")
             parse_psd(args.mobile, mobile_dir)
-        print(f"\n=== Xuat du an {fw.upper()} (khong dung AI) ===")
+        print(f"\n=== Xuat du an {fw.upper()}/{args.lang} (khong dung AI) ===")
         from .export_web import export
-        proj = export(args.out, framework=fw, mobile_dir=mobile_dir)
+        proj = export(args.out, framework=fw, lang=args.lang, mobile_dir=mobile_dir)
         print(f"\nHOAN TAT -> {proj}")
         return
 

@@ -42,11 +42,27 @@ Mở **http://localhost:5000** → kéo file PSD (desktop + tuỳ chọn mobile)
 ### Xuất React / Next
 
 ```powershell
-venv\Scripts\python.exe -m psd2html.cli file.psd -o output --react   # -> output\react-app
-venv\Scripts\python.exe -m psd2html.cli file.psd -o output --next    # -> output\next-app
+venv\Scripts\python.exe -m psd2html.cli file.psd -o output --react            # JS (mac dinh)
+venv\Scripts\python.exe -m psd2html.cli file.psd -o output --react --lang ts  # TypeScript
+venv\Scripts\python.exe -m psd2html.cli file.psd -o output --next --lang ts   # Next + TS
 ```
 
-Rồi: `cd output\react-app && npm install && npm run dev`. Tailwind cho class tiện ích, component `Stage` tự co giãn responsive. **Nhiều artboard** trong 1 PSD → mỗi artboard thành 1 component (React) / 1 route (Next).
+Rồi: `cd output\react-app && npm install && npm run dev`.
+
+**Chọn TypeScript hoặc JavaScript** qua `--lang ts|js` (hoặc bộ chọn trên web UI). TS kèm `types/landing.ts` + `tsconfig.json`.
+
+**Chia nhỏ theo section — dễ maintain:** mỗi section là 1 component riêng trong `components/landing/` (vd `DiemDanh`, `NapDungGoi`, `TichLuyNap`...), cùng `Stage` (responsive), `Layer` (1 lớp ảnh), `Background` (nền), và mỗi cụm lặp 1 file. `Landing` ghép tất cả lại. Cấu trúc:
+```
+src/components/
+  Stage.tsx
+  landing/
+    Landing.tsx        # ghép các section
+    Background.tsx
+    DiemDanh.tsx  NapDungGoi.tsx  ...   # mỗi section 1 file
+    Group66.tsx  ...                     # mỗi cụm lặp 1 file
+  landing-mobile/      # nếu có --mobile
+src/types/landing.ts   # (TS)
+``` Tailwind cho class tiện ích, component `Stage` tự co giãn responsive. **Nhiều artboard** trong 1 PSD → mỗi artboard thành 1 component (React) / 1 route (Next).
 
 **Tự động componentize group lặp (API-ready):** các cụm lặp (7 thẻ điểm danh, 3 gói nạp...) được tự phát hiện và sinh thành 1 component render bằng `.map()` qua mảng data:
 - Mỗi phần tử: `{ id, x, y, sN (ảnh khác nhau như "Ngày 1"), claimed, items }` — thay bằng data từ BE.

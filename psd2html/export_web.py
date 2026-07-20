@@ -1,31 +1,37 @@
 """
-Xuat sang du an REACT (Vite) hoac NEXT (app router), dung Tailwind.
+Xuat sang du an REACT (Vite) hoac NEXT (app router), Tailwind, chon TS hoac JS.
 
-Diem manh: TU DONG PHAT HIEN GROUP LAP (vd 7 the diem danh, 3 goi nap...) va
-sinh thanh 1 component render bang .map() qua mang DATA -> de tich hop API tu BE:
-  - Moi cum lap co 1 mang data (id, vi tri, o vat pham, trang thai claimed...).
-  - Nut "Nhan Qua" goi callback onClaim(id) -> cam API vao day.
-  - O vat pham (items) render tu data BE tra ve.
-  - Kem hook fetch stub (useLandingData) de dien endpoint.
+- Tu phat hien GROUP LAP (7 the diem danh...) -> component render bang .map() + API hooks.
+- Chia trang thanh nhieu COMPONENT theo SECTION (components/landing/*) de de maintain.
+- Tach san: Stage (responsive), Layer (1 lop anh), Background (nen), va tung repeat item.
+- TypeScript: kem types/landing + tsconfig.
 
 Dung:
   from psd2html.export_web import export
-  export("output", framework="react")   # hoac "next"
+  export("output", framework="react", lang="ts", mobile_dir=None)
 """
 
 import json
 import re
 import shutil
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
 from .render_slices import _is_interactive, _content_bottom_from_image, _norm
+from .sectionize import split_sections
 
 
-# ---------- tien ich ----------
+# ================= tien ich =================
+
+def _ascii(s):
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return s.replace("đ", "d").replace("Đ", "D")
+
 
 def _pascal(s):
-    parts = re.split(r"[^0-9a-zA-Z]+", s or "")
+    parts = re.split(r"[^0-9a-zA-Z]+", _ascii(s or ""))
     name = "".join(p[:1].upper() + p[1:] for p in parts if p)
     if not name:
         name = "Item"
@@ -35,15 +41,12 @@ def _pascal(s):
 
 
 def _slug(s):
-    s = re.sub(r"[^0-9a-zA-Z]+", "-", (s or "").lower()).strip("-")
-    return s or "page"
+    return re.sub(r"[^0-9a-zA-Z]+", "-", _ascii(s or "").lower()).strip("-") or "page"
 
 
 def _norm_name(name):
-    """Chuan hoa ten group: bo hau to ' copy' / ' copy N' de gom cac ban sao."""
     n = (name or "").strip().lower()
-    n = re.sub(r"\s*copy(\s*\d+)?\s*$", "", n)
-    return n.strip()
+    return re.sub(r"\s*copy(\s*\d+)?\s*$", "", n).strip()
 
 
 def _index(layout):
@@ -55,7 +58,6 @@ def _index(layout):
 
 
 def _leaves(gid, by_id, children):
-    """Tat ca layer con (co asset) cua 1 group, de quy."""
     out = []
     for cid in children.get(gid, []):
         n = by_id[cid]
@@ -82,28 +84,22 @@ def _alt_of(l):
 
 
 def _src(asset, asset_dir):
-    """Duong dan anh trong project: /<asset_dir>/<ten-file>."""
     return f"/{asset_dir}/{Path(asset).name}"
 
 
-# ---------- phat hien group lap ----------
+def _ext(lang):
+    return "tsx" if lang == "ts" else "jsx"
+
+
+def _ann(lang, t):
+    return f": {t}" if lang == "ts" else ""
+
+
+# ================= phat hien group lap =================
 
 def _detect_repeats(layout, ab_bbox, by_id, children, asset_dir="assets"):
-    """
-    Tim cac cum group lap (>=3 sibling cung ten chuan hoa, kich thuoc tuong tu).
-    Tra ve (repeats, consumed_leaf_ids).
-
-    Moi repeat:
-      {
-        comp, W, H,
-        slots: [ {rx,ry,w,h, kind:'static'|'var'|'button', asset, var, alt, blend, o} ],
-        instances: [ {id, x, y, vars:{var:asset}} ],
-        item_area: {x,y,w,h},   # goi y vung dat vat pham
-      }
-    """
     ax, ay = ab_bbox["x"], ab_bbox["y"]
     groups = [l for l in layout["layers"] if l.get("kind") == "group"]
-
     clusters = defaultdict(list)
     for g in groups:
         b = g["bbox"]
@@ -112,7 +108,6 @@ def _detect_repeats(layout, ab_bbox, by_id, children, asset_dir="assets"):
             continue
         clusters[(g.get("parent"), _norm_name(g["name"]))].append(g)
 
-    # Xu ly cum to truoc; tranh long nhau
     cand = []
     for (parent, nm), members in clusters.items():
         if len(members) < 3:
@@ -128,23 +123,17 @@ def _detect_repeats(layout, ab_bbox, by_id, children, asset_dir="assets"):
         cand.append((medw * medh, nm, members))
     cand.sort(reverse=True)
 
-    consumed_groups = set()
-    consumed_leaves = set()
-    repeats = []
+    consumed_groups, consumed_leaves, repeats = set(), set(), []
     used_names = {}
-
     for _, nm, members in cand:
         if any(m["id"] in consumed_groups for m in members):
             continue
         members.sort(key=lambda m: (round(m["bbox"]["y"] / 20), m["bbox"]["x"]))
-
-        inst_leaves = []
-        for m in members:
-            inst_leaves.append((m, _leaves(m["id"], by_id, children)))
+        inst_leaves = [(m, _leaves(m["id"], by_id, children)) for m in members]
         counts = {len(lv) for _, lv in inst_leaves}
-        aligned = []
         same = len(counts) == 1 and next(iter(counts)) > 0
         take = inst_leaves if same else inst_leaves[:1]
+        aligned = []
         for m, lv in take:
             ox, oy = m["bbox"]["x"], m["bbox"]["y"]
             s = sorted(lv, key=lambda n: (round((n["bbox"]["y"] - oy) / 8), n["bbox"]["x"] - ox))
@@ -152,20 +141,15 @@ def _detect_repeats(layout, ab_bbox, by_id, children, asset_dir="assets"):
         if not aligned or len(aligned[0][3]) == 0:
             continue
 
-        # ten component doc nhat
         comp = _pascal(nm) or "Item"
         used_names[comp] = used_names.get(comp, 0) + 1
         if used_names[comp] > 1:
             comp = f"{comp}{used_names[comp]}"
 
         tpl_m, tox, toy, tpl_leaves = aligned[0]
-        nslots = len(tpl_leaves)
-        slots = []
-        var_idx = 0
-        for si in range(nslots):
+        slots, var_idx = [], 0
+        for si in range(len(tpl_leaves)):
             tnode = tpl_leaves[si]
-            # So theo TEN layer: khung the (cung ten) -> static dung chung;
-            # chi cai khac ten (vd 'Ngay 1' vs 'Ngay 2') moi la bien.
             names = [_norm(a[3][si].get("name", "")) for a in aligned] if same else [_norm(tnode.get("name", ""))]
             varying = len(set(names)) > 1
             slot = {
@@ -177,56 +161,31 @@ def _detect_repeats(layout, ab_bbox, by_id, children, asset_dir="assets"):
             if _is_interactive(tnode):
                 slot["kind"] = "button"
             elif varying:
-                slot["kind"] = "var"
-                slot["var"] = f"s{var_idx}"
+                slot["kind"], slot["var"] = "var", f"s{var_idx}"
                 var_idx += 1
             else:
                 slot["kind"] = "static"
             slots.append(slot)
 
         instances = []
-        for idx, (m, ox, oy, s) in enumerate(aligned, start=1):
-            vars_ = {}
-            for si, slot in enumerate(slots):
-                if slot["kind"] == "var":
-                    vars_[slot["var"]] = _src(s[si]["asset"], asset_dir)
-            instances.append({
-                "id": idx,
-                "x": m["bbox"]["x"] - ax, "y": m["bbox"]["y"] - ay,
-                "vars": vars_,
-            })
+        for (m, ox, oy, s) in aligned:
+            vars_ = {slot["var"]: _src(s[si]["asset"], asset_dir)
+                     for si, slot in enumerate(slots) if slot["kind"] == "var"}
+            instances.append({"id": len(instances) + 1,
+                              "x": m["bbox"]["x"] - ax, "y": m["bbox"]["y"] - ay, "vars": vars_})
 
-        # vung goi y dat vat pham = bao cua cac slot static lon nhat (khong phai button)
-        area = None
-        big = [sl for sl in slots if sl["kind"] != "button"]
-        if big:
-            x0 = min(sl["rx"] for sl in big); y0 = min(sl["ry"] for sl in big)
-            x1 = max(sl["rx"] + sl["w"] for sl in big); y1 = max(sl["ry"] + sl["h"] for sl in big)
-            area = {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
-
-        repeats.append({
-            "comp": comp,
-            "W": tpl_m["bbox"]["width"], "H": tpl_m["bbox"]["height"],
-            "slots": slots, "instances": instances, "item_area": area,
-            "count": len(instances),
-        })
-
+        repeats.append({"comp": comp, "W": tpl_m["bbox"]["width"], "H": tpl_m["bbox"]["height"],
+                        "slots": slots, "instances": instances, "count": len(instances)})
         for m in members:
             consumed_groups.add(m["id"])
             for gid in _descendant_groups(m["id"], by_id, children):
                 consumed_groups.add(gid)
             for lf in _leaves(m["id"], by_id, children):
                 consumed_leaves.add(lf["id"])
-
     return repeats, consumed_leaves
 
 
 def _detect_menu(layout, ab_bbox, by_id, children):
-    """
-    Phat hien menu bat/tat: 1 nut hamburger + 1 panel menu (overlay).
-    Tra ve (menu_leaf_ids, toggle_id). Chi tra ve khi CO CA nut lan panel
-    (neu chi co menu luon hien - vd nav desktop - thi khong dung, tra rong).
-    """
     ax, ay = ab_bbox["x"], ab_bbox["y"]
     aw, ah = ab_bbox["width"], ab_bbox["height"]
 
@@ -234,27 +193,20 @@ def _detect_menu(layout, ab_bbox, by_id, children):
         cx, cy = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
         return ax <= cx < ax + aw and ay <= cy < ay + ah
 
-    # nut hamburger: layer nho co 'menu'/'nut'/'ham' trong ten, gan dinh trang
     toggle = None
     for l in layout["layers"]:
         if l.get("kind") == "group" or not l.get("asset"):
             continue
         nm = _norm(l.get("name", ""))
         b = l["bbox"]
-        if not inside(b):
-            continue
-        if (("menu" in nm) or ("nut" in nm) or ("ham" in nm)) and b["width"] < 160 and b["height"] < 160:
+        if inside(b) and (("menu" in nm) or ("nut" in nm) or ("ham" in nm)) and b["width"] < 160 and b["height"] < 160:
             if toggle is None or b["y"] < toggle["bbox"]["y"]:
                 toggle = l
     if toggle is None:
         return set(), None
-
-    # panel menu: group lon nhat co 'menu' trong ten (overlay)
     best, best_area = None, 0
     for g in layout["layers"]:
-        if g.get("kind") != "group":
-            continue
-        if "menu" not in _norm(g.get("name", "")):
+        if g.get("kind") != "group" or "menu" not in _norm(g.get("name", "")):
             continue
         b = g["bbox"]
         area = b["width"] * b["height"]
@@ -262,14 +214,12 @@ def _detect_menu(layout, ab_bbox, by_id, children):
             best, best_area = g, area
     if best is None:
         return set(), None
-
     ids = {lf["id"] for lf in _leaves(best["id"], by_id, children)}
     ids.discard(toggle["id"])
     return ids, toggle["id"]
 
 
-def _build_flat(layers, ab_bbox, exclude, asset_dir="assets", menu_ids=None, toggle_id=None):
-    """Layer khong thuoc cum lap -> render phang nhu che do slices."""
+def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id):
     ax, ay = ab_bbox["x"], ab_bbox["y"]
     items = []
     for l in layers:
@@ -279,12 +229,11 @@ def _build_flat(layers, ab_bbox, exclude, asset_dir="assets", menu_ids=None, tog
         cx, cy = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
         if not (ax <= cx < ax + ab_bbox["width"] and ay <= cy < ay + ab_bbox["height"]):
             continue
-        item = {
-            "id": l["id"], "src": _src(l["asset"], asset_dir),
-            "x": b["x"] - ax, "y": b["y"] - ay, "w": b["width"], "h": b["height"],
-            "o": l.get("opacity", 1), "blend": l.get("blend"),
-            "alt": _alt_of(l), "href": "#" if _is_interactive(l) else None,
-        }
+        item = {"id": l["id"], "src": _src(l["asset"], asset_dir),
+                "x": b["x"] - ax, "y": b["y"] - ay, "w": b["width"], "h": b["height"],
+                "o": l.get("opacity", 1), "blend": l.get("blend"),
+                "alt": _alt_of(l), "href": "#" if _is_interactive(l) else None,
+                "t": l.get("kind") == "type"}
         if toggle_id and l["id"] == toggle_id:
             item["toggle"] = True
             item["href"] = None
@@ -294,190 +243,306 @@ def _build_flat(layers, ab_bbox, exclude, asset_dir="assets", menu_ids=None, tog
     return items
 
 
+# ================= chia section =================
+
+def _looks_title(alt):
+    if not alt or len(alt) > 40:
+        return False
+    if re.fullmatch(r"[0-9a-f]{6,}.*", alt):   # ten dang hash
+        return False
+    return bool(re.search(r"[a-zàáâãèéêìíòóôõùúăâêôơưỳý/ ]", alt)) and (" " in alt or len(alt) <= 16)
+
+
+def _section_name(flat, W, H, y0, y1, idx, used):
+    """Dat ten section theo tieu de noi bat (neu doan duoc), khong thi Section{n}."""
+    band_h = max(1, y1 - y0)
+    # chi lay LAYER CHU (t=True) lam tieu de section; uu tien o tren cung
+    cands = [it for it in flat if it.get("t") and it["y"] < y0 + band_h * 0.6 and _looks_title(it["alt"])]
+    cands.sort(key=lambda it: (it["y"], -it["w"]))
+    name = _pascal(cands[0]["alt"])[:24] if cands else f"Section{idx + 1}"
+    base = name
+    k = 1
+    while name in used:
+        k += 1
+        name = f"{base}{k}"
+    used.add(name)
+    return name
+
+
+def _split_sections(board, layout):
+    W, H = board["W"], board["H"]
+    flat = board["flat"]
+    # nen phu toan trang -> component Background rieng
+    bg = [it for it in flat if it["h"] >= 0.5 * H or it["w"] >= 0.85 * W]
+    content = [it for it in flat if it not in bg]
+    board["backgrounds"] = bg
+
+    try:
+        bands = [(s["y0"], s["y1"]) for s in split_sections(layout)]
+    except Exception:
+        bands = [(0, H)]
+    if not bands:
+        bands = [(0, H)]
+
+    reps = board["repeats"]
+    rep_band = {}
+    for j, rp in enumerate(reps):
+        cy = sorted(inst["y"] + rp["H"] / 2 for inst in rp["instances"])[len(rp["instances"]) // 2]
+        rep_band[j] = cy
+
+    sections, used = [], set()
+    for i, (y0, y1) in enumerate(bands):
+        sflat = [it for it in content if y0 <= it["y"] + it["h"] / 2 < y1]
+        sreps = [reps[j] for j in rep_band if y0 <= rep_band[j] < y1]
+        if not sflat and not sreps:
+            continue
+        name = _section_name(sflat, W, H, y0, y1, len(sections), used)
+        sections.append({"comp": name, "flat": sflat, "repeats": sreps, "y0": y0})
+    # repeat chua gan (hiem) -> section dau
+    assigned = {rp["comp"] for s in sections for rp in s["repeats"]}
+    leftover = [rp for rp in reps if rp["comp"] not in assigned]
+    if leftover:
+        if sections:
+            sections[0]["repeats"] = leftover + sections[0]["repeats"]
+        else:
+            sections.append({"comp": "Section1", "flat": [], "repeats": leftover, "y0": 0})
+    board["sections"] = sections
+
+
 def _artboards_from_layout(layout, asset_dir="assets", comp_prefix=""):
     cw, ch = layout["canvas"]["width"], layout["canvas"]["height"]
     by_id, children = _index(layout)
-    abs_ = layout.get("artboards") or []
-    defs = abs_ if abs_ else [{
-        "name": layout.get("source", "Page"),
-        "bbox": {"x": 0, "y": 0, "width": cw, "height": ch},
-    }]
-    result = []
-    for ab in defs:
-        repeats, consumed = _detect_repeats(layout, ab["bbox"], by_id, children, asset_dir)
-        menu_ids, toggle_id = _detect_menu(layout, ab["bbox"], by_id, children)
-        flat = _build_flat(layout["layers"], ab["bbox"], consumed, asset_dir, menu_ids, toggle_id)
-        name = ab["name"]
-        stem = Path(name).stem  # bo duoi .psd neu la ten file nguon
-        result.append({
-            "name": name, "comp": comp_prefix + _pascal(stem), "slug": _slug(stem),
-            "W": ab["bbox"]["width"], "H": ab["bbox"]["height"],
-            "flat": flat, "repeats": repeats,
-            "has_menu": bool(toggle_id),
-        })
-    return result
+    ab = {"x": 0, "y": 0, "width": cw, "height": ch}
+    repeats, consumed = _detect_repeats(layout, ab, by_id, children, asset_dir)
+    menu_ids, toggle_id = _detect_menu(layout, ab, by_id, children)
+    flat = _build_flat(layout["layers"], ab, consumed, asset_dir, menu_ids, toggle_id)
+    stem = Path(layout.get("source", "Page")).stem
+    board = {"comp": comp_prefix + "Landing", "landing_name": comp_prefix + "Landing",
+             "W": cw, "H": ch, "flat": flat, "repeats": repeats, "has_menu": bool(toggle_id)}
+    return board
 
 
-# ---------- sinh JSX ----------
+# ================= sinh JSX/TSX =================
 
-STAGE_JSX = """import { useRef, useEffect, useState } from "react";
-
-// Khung co dinh WxH, tu thu nho vua chieu rong man hinh (responsive).
-export default function Stage({ width, height, children }) {
-  const ref = useRef(null);
-  const [scale, setScale] = useState(1);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const fit = () => setScale(Math.min(1, el.clientWidth / width));
-    fit();
-    window.addEventListener("resize", fit);
-    return () => window.removeEventListener("resize", fit);
-  }, [width]);
-  return (
-    <div ref={ref} className="w-full overflow-hidden" style={{ height: height * scale }}>
-      <div className="relative" style={{ width, height, transformOrigin: "top left", transform: `scale(${scale})` }}>
-        {children}
-      </div>
-    </div>
-  );
-}
-"""
+def _gen_types():
+    return (
+        "export interface LayerItem {\n"
+        "  id: string; src: string; x: number; y: number; w: number; h: number;\n"
+        "  o: number; blend?: string | null; alt?: string;\n"
+        "  href?: string | null; menu?: boolean; toggle?: boolean;\n}\n\n"
+        "export interface SlotItem { src: string; x: number; y: number; w: number; h: number; alt?: string; }\n\n"
+        "export interface RepeatItem {\n"
+        "  id: number; x: number; y: number; claimed?: boolean;\n"
+        "  items?: SlotItem[]; [key: string]: unknown;\n}\n\n"
+        "export interface SectionProps {\n"
+        "  onClaim?: (id: number) => void; menuOpen?: boolean; onToggleMenu?: () => void;\n}\n"
+    )
 
 
-def _repeat_component_code(rp):
-    """Sinh 1 function component cho cum lap."""
-    lines = []
-    lines.append(f"function {rp['comp']}({{ item, onClaim }}) {{")
-    lines.append("  return (")
-    lines.append(f'    <div className="absolute" style={{{{ left: item.x, top: item.y, width: {rp["W"]}, height: {rp["H"]} }}}}>')
+def _gen_stage(lang, client):
+    head = '"use client";\n\n' if client else ""
+    if lang == "ts":
+        return head + (
+            'import { useRef, useEffect, useState } from "react";\n'
+            'import type { ReactNode } from "react";\n\n'
+            "export default function Stage({ width, height, children }: "
+            "{ width: number; height: number; children: ReactNode }) {\n"
+            "  const ref = useRef<HTMLDivElement>(null);\n"
+            "  const [scale, setScale] = useState(1);\n"
+            "  useEffect(() => {\n"
+            "    const el = ref.current;\n    if (!el) return;\n"
+            "    const fit = () => setScale(Math.min(1, el.clientWidth / width));\n"
+            "    fit();\n    window.addEventListener('resize', fit);\n"
+            "    return () => window.removeEventListener('resize', fit);\n  }, [width]);\n"
+            "  return (\n"
+            '    <div ref={ref} className="w-full overflow-hidden" style={{ height: height * scale }}>\n'
+            '      <div className="relative" style={{ width, height, transformOrigin: "top left", transform: `scale(${scale})` }}>\n'
+            "        {children}\n      </div>\n    </div>\n  );\n}\n")
+    return head + (
+        'import { useRef, useEffect, useState } from "react";\n\n'
+        "export default function Stage({ width, height, children }) {\n"
+        "  const ref = useRef(null);\n  const [scale, setScale] = useState(1);\n"
+        "  useEffect(() => {\n    const el = ref.current;\n    if (!el) return;\n"
+        "    const fit = () => setScale(Math.min(1, el.clientWidth / width));\n"
+        "    fit();\n    window.addEventListener('resize', fit);\n"
+        "    return () => window.removeEventListener('resize', fit);\n  }, [width]);\n"
+        "  return (\n"
+        '    <div ref={ref} className="w-full overflow-hidden" style={{ height: height * scale }}>\n'
+        '      <div className="relative" style={{ width, height, transformOrigin: "top left", transform: `scale(${scale})` }}>\n'
+        "        {children}\n      </div>\n    </div>\n  );\n}\n")
+
+
+def _gen_layer(lang, client):
+    head = '"use client";\n\n' if client else ""
+    imp = 'import type { LayerItem } from "../../types/landing";\n\n' if lang == "ts" else ""
+    sig = ("{ l, menuOpen, onToggleMenu }: { l: LayerItem; menuOpen?: boolean; onToggleMenu?: () => void }"
+           if lang == "ts" else "{ l, menuOpen, onToggleMenu }")
+    style_ty = _ann(lang, "React.CSSProperties")
+    react_imp = 'import type React from "react";\n' if lang == "ts" else ""
+    return head + react_imp + imp + (
+        f"// 1 lop anh (img); tu xu ly nut menu (toggle) va an/hien menu.\n"
+        f"export default function Layer({sig}) {{\n"
+        f"  const style{style_ty} = {{ left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o, mixBlendMode: (l.blend || undefined){_ann(lang,'any') and ' as any' or ''} }};\n"
+        "  if (l.toggle) {\n"
+        "    return (\n"
+        '      <button onClick={onToggleMenu} title={l.alt}\n'
+        '        className="absolute block cursor-pointer transition hover:brightness-110" style={style}>\n'
+        '        <img src={l.src} alt={l.alt} className="block w-full h-full" />\n'
+        "      </button>\n    );\n  }\n"
+        "  if (l.menu && !menuOpen) return null;\n"
+        "  return l.href ? (\n"
+        '    <a href={l.href} title={l.alt} className="absolute block cursor-pointer transition hover:brightness-110" style={style}>\n'
+        '      <img src={l.src} alt={l.alt} className="block w-full h-full" />\n'
+        "    </a>\n  ) : (\n"
+        '    <img src={l.src} alt={l.alt} className="absolute block" style={style} />\n  );\n}\n')
+
+
+def _flat_json(items):
+    keep = []
+    for it in items:
+        o = {"id": it["id"], "src": it["src"], "x": it["x"], "y": it["y"],
+             "w": it["w"], "h": it["h"], "o": it["o"], "alt": it["alt"]}
+        if it.get("blend"):
+            o["blend"] = it["blend"]
+        if it.get("href"):
+            o["href"] = it["href"]
+        if it.get("menu"):
+            o["menu"] = True
+        if it.get("toggle"):
+            o["toggle"] = True
+        keep.append(o)
+    return json.dumps(keep, ensure_ascii=False, indent=2)
+
+
+def _gen_background(board, lang, client):
+    head = '"use client";\n\n' if client else ""
+    imp = 'import type { LayerItem } from "../../types/landing";\n\n' if lang == "ts" else ""
+    decl = f"const bg{_ann(lang, 'LayerItem[]')} = {_flat_json(board['backgrounds'])};\n\n"
+    return head + imp + decl + (
+        "export default function Background() {\n  return (\n    <>\n"
+        "      {bg.map((l) => (\n"
+        '        <img key={l.id} src={l.src} alt={l.alt} className="absolute block"\n'
+        "          style={{ left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o }} />\n"
+        "      ))}\n    </>\n  );\n}\n")
+
+
+def _gen_repeat(rp, lang, client):
+    head = '"use client";\n\n' if client else ""
+    imp = 'import type { RepeatItem } from "../../types/landing";\n\n' if lang == "ts" else ""
+    sig = ("{ item, onClaim }: { item: RepeatItem; onClaim?: (id: number) => void }"
+           if lang == "ts" else "{ item, onClaim }")
+    L = [head + imp, f"export default function {rp['comp']}({sig}) {{",
+         "  return (",
+         f'    <div className="absolute" style={{{{ left: item.x, top: item.y, width: {rp["W"]}, height: {rp["H"]} }}}}>']
     for sl in rp["slots"]:
-        style = (f'{{{{ left: {sl["rx"]}, top: {sl["ry"]}, width: {sl["w"]}, height: {sl["h"]}'
-                 f', opacity: {sl["o"]}'
+        style = (f'{{{{ left: {sl["rx"]}, top: {sl["ry"]}, width: {sl["w"]}, height: {sl["h"]}, opacity: {sl["o"]}'
                  + (f', mixBlendMode: "{sl["blend"]}"' if sl.get("blend") else "") + " }}")
         if sl["kind"] == "button":
-            lines.append(f'      <button onClick={{() => onClaim && onClaim(item.id)}} title="{sl["alt"]}"')
-            lines.append(f'        className="absolute block cursor-pointer transition hover:brightness-110" style={style}>')
-            lines.append(f'        <img src="{sl["asset"]}" alt="{sl["alt"]}" className="block w-full h-full" />')
-            lines.append('      </button>')
+            L.append(f'      <button onClick={{() => onClaim && onClaim(item.id)}} title="{sl["alt"]}"')
+            L.append(f'        className="absolute block cursor-pointer transition hover:brightness-110" style={style}>')
+            L.append(f'        <img src="{sl["asset"]}" alt="{sl["alt"]}" className="block w-full h-full" />')
+            L.append("      </button>")
         elif sl["kind"] == "var":
-            lines.append(f'      {{item.{sl["var"]} && <img className="absolute block" style={style} src={{item.{sl["var"]}}} alt="{sl["alt"]}" />}}')
+            L.append(f'      {{item.{sl["var"]} ? <img className="absolute block" style={style} '
+                     f'src={{item.{sl["var"]} as string}} alt="{sl["alt"]}" /> : null}}'
+                     if lang == "ts" else
+                     f'      {{item.{sl["var"]} && <img className="absolute block" style={style} '
+                     f'src={{item.{sl["var"]}}} alt="{sl["alt"]}" />}}')
         else:
-            lines.append(f'      <img className="absolute block" style={style} src="{sl["asset"]}" alt="{sl["alt"]}" />')
-    # o vat pham tu API
-    if rp.get("item_area"):
-        a = rp["item_area"]
-        lines.append(f'      {{/* Vat pham do BE tra ve: item.items = [{{src,x,y,w,h}}] (toa do trong the) */}}')
-        lines.append('      {(item.items || []).map((it, i) => (')
-        lines.append('        <img key={i} className="absolute block" src={it.src} alt={it.alt || ""}')
-        lines.append('          style={{ left: it.x, top: it.y, width: it.w, height: it.h }} />')
-        lines.append('      ))}')
-    # trang thai da nhan
-    lines.append('      {item.claimed && <div className="absolute inset-0 bg-black/40" />}')
-    lines.append("    </div>")
-    lines.append("  );")
-    lines.append("}")
-    return "\n".join(lines)
+            L.append(f'      <img className="absolute block" style={style} src="{sl["asset"]}" alt="{sl["alt"]}" />')
+    L.append('      {(item.items || []).map((it, i) => (')
+    L.append('        <img key={i} className="absolute block" src={it.src} alt={it.alt || ""}')
+    L.append("          style={{ left: it.x, top: it.y, width: it.w, height: it.h }} />")
+    L.append("      ))}")
+    L.append('      {item.claimed ? <div className="absolute inset-0 bg-black/40" /> : null}')
+    L += ["    </div>", "  );", "}", ""]
+    return "\n".join(L)
 
 
-def _gen_component(board, client=False):
+def _gen_section(sec, lang, client):
     head = '"use client";\n\n' if client else ""
-    flat_json = json.dumps(board["flat"], ensure_ascii=False, indent=2)
-
-    # data cua tung cum lap
-    data_blocks = []
-    repeat_render = []
-    repeat_comps = []
-    for rp in board["repeats"]:
-        var_name = rp["comp"][0].lower() + rp["comp"][1:] + "Data"
+    imports = ['import Layer from "./Layer";']
+    for rp in sec["repeats"]:
+        imports.append(f'import {rp["comp"]} from "./{rp["comp"]}";')
+    if lang == "ts":
+        imports.append('import type { SectionProps, LayerItem, RepeatItem } from "../../types/landing";')
+    blocks = [head + "\n".join(imports) + "\n"]
+    blocks.append(f"const flat{_ann(lang, 'LayerItem[]')} = {_flat_json(sec['flat'])};\n")
+    for rp in sec["repeats"]:
+        var = rp["comp"][0].lower() + rp["comp"][1:] + "Data"
         data = []
         for inst in rp["instances"]:
-            entry = {"id": inst["id"], "x": inst["x"], "y": inst["y"]}
-            entry.update(inst["vars"])
-            entry["claimed"] = False
-            entry["items"] = []      # BE dien vat pham vao day
-            data.append(entry)
-        data_blocks.append(f"// {rp['count']} phan tu lap - thay bang data tu API\n"
-                           f"const {var_name} = {json.dumps(data, ensure_ascii=False, indent=2)};")
-        repeat_comps.append(_repeat_component_code(rp))
-        repeat_render.append(
-            f"      {{{var_name}.map((it) => (\n"
-            f"        <{rp['comp']} key={{it.id}} item={{it}} onClaim={{onClaim}} />\n"
-            f"      ))}}")
-
-    menu_branch = """        if (l.toggle) {
-          return (
-            <button key={l.id} onClick={() => setMenuOpen((o) => !o)} title={l.alt}
-              className="absolute block cursor-pointer transition hover:brightness-110" style={style}>
-              <img src={l.src} alt={l.alt} className="block w-full h-full" />
-            </button>
-          );
-        }
-        if (l.menu && !menuOpen) return null;
-""" if board.get("has_menu") else ""
-    flat_render = """      {flatLayers.map((l) => {
-        const style = { left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o, mixBlendMode: l.blend || undefined };
-""" + menu_branch + """        return l.href ? (
-          <a key={l.id} href={l.href} title={l.alt} className="absolute block cursor-pointer transition hover:brightness-110" style={style}>
-            <img src={l.src} alt={l.alt} className="block w-full h-full" />
-          </a>
-        ) : (
-          <img key={l.id} src={l.src} alt={l.alt} className="absolute block" style={style} />
-        );
-      })}"""
-
-    parts = [head]
-    if board.get("has_menu"):
-        parts.append('import { useState } from "react";\n')
-    parts.append('import Stage from "./Stage";\n')
-    parts.append(f"const W = {board['W']};\nconst H = {board['H']};\n")
-    parts.append(f"const flatLayers = {flat_json};\n")
-    if data_blocks:
-        parts.append("\n".join(data_blocks) + "\n")
-    if repeat_comps:
-        parts.append("\n\n".join(repeat_comps) + "\n")
-
-    parts.append(f"export default function {board['comp']}() {{")
-    if board.get("has_menu"):
-        parts.append("  const [menuOpen, setMenuOpen] = useState(false);  // menu bat/tat")
-    parts.append("  // TODO: goi API nhan qua o day (vd fetch POST /api/claim)")
-    parts.append("  const onClaim = (id) => { console.log('claim', id); };")
-    parts.append("  return (")
-    parts.append("    <Stage width={W} height={H}>")
-    parts.append(flat_render)
-    if repeat_render:
-        parts.append("\n".join(repeat_render))
-    parts.append("    </Stage>")
-    parts.append("  );")
-    parts.append("}")
-    return "\n".join(parts) + "\n"
+            e = {"id": inst["id"], "x": inst["x"], "y": inst["y"]}
+            e.update(inst["vars"])
+            e["claimed"] = False
+            e["items"] = []
+            data.append(e)
+        blocks.append(f"// {rp['count']} phan tu lap - thay bang data tu API\n"
+                      f"const {var}{_ann(lang, 'RepeatItem[]')} = {json.dumps(data, ensure_ascii=False, indent=2)};\n")
+    sig = "{ onClaim, menuOpen, onToggleMenu }" + _ann(lang, "SectionProps")
+    body = [f"export default function {sec['comp']}({sig}) {{", "  return (", "    <>"]
+    body.append("      {flat.map((l) => (")
+    body.append("        <Layer key={l.id} l={l} menuOpen={menuOpen} onToggleMenu={onToggleMenu} />")
+    body.append("      ))}")
+    for rp in sec["repeats"]:
+        var = rp["comp"][0].lower() + rp["comp"][1:] + "Data"
+        body.append(f"      {{{var}.map((it) => (")
+        body.append(f'        <{rp["comp"]} key={{it.id}} item={{it}} onClaim={{onClaim}} />')
+        body.append("      ))}")
+    body += ["    </>", "  );", "}", ""]
+    return "\n".join(blocks) + "\n".join(body)
 
 
-# ---------- cau hinh du an ----------
+def _gen_landing(board, lang, client, stage_rel="../Stage"):
+    head = '"use client";\n\n' if client else ""
+    comp = board["landing_name"]
+    imports = ['import { useState } from "react";', f'import Stage from "{stage_rel}";',
+               'import Background from "./Background";']
+    for sec in board["sections"]:
+        imports.append(f'import {sec["comp"]} from "./{sec["comp"]}";')
+    L = [head + "\n".join(imports) + "\n"]
+    L.append(f"export default function {comp}() {{")
+    L.append(f"  const [menuOpen, setMenuOpen] = useState(false);")
+    L.append("  // TODO: goi API nhan qua o day (vd fetch POST /api/claim)")
+    L.append(f"  const onClaim = (id{_ann(lang, 'number')}) => {{ console.log('claim', id); }};")
+    L.append("  const onToggleMenu = () => setMenuOpen((o) => !o);")
+    L.append("  const props = { onClaim, menuOpen, onToggleMenu };")
+    L.append("  return (")
+    L.append(f"    <Stage width={{{board['W']}}} height={{{board['H']}}}>")
+    L.append("      <Background />")
+    for sec in board["sections"]:
+        L.append(f"      <{sec['comp']} {{...props}} />")
+    L += ["    </Stage>", "  );", "}", ""]
+    return "\n".join(L)
 
-TAILWIND_CFG_REACT = """/** @type {import('tailwindcss').Config} */
-export default {
-  content: ["./index.html", "./src/**/*.{js,jsx}"],
-  theme: { extend: {} },
-  plugins: [],
-};
-"""
 
-TAILWIND_CFG_NEXT = """/** @type {import('tailwindcss').Config} */
-module.exports = {
-  content: ["./app/**/*.{js,jsx}", "./components/**/*.{js,jsx}"],
-  theme: { extend: {} },
-  plugins: [],
-};
-"""
+# ================= cau hinh du an =================
 
-POSTCSS_CFG_CJS = "module.exports = {\n  plugins: { tailwindcss: {}, autoprefixer: {} },\n};\n"
-POSTCSS_CFG_ESM = "export default {\n  plugins: { tailwindcss: {}, autoprefixer: {} },\n};\n"
+TAILWIND_REACT = ('/** @type {import(\'tailwindcss\').Config} */\nexport default {\n'
+                  '  content: ["./index.html", "./src/**/*.{js,jsx,ts,tsx}"],\n  theme: { extend: {} },\n  plugins: [],\n};\n')
+TAILWIND_NEXT = ('/** @type {import(\'tailwindcss\').Config} */\nmodule.exports = {\n'
+                 '  content: ["./app/**/*.{js,jsx,ts,tsx}", "./components/**/*.{js,jsx,ts,tsx}"],\n  theme: { extend: {} },\n  plugins: [],\n};\n')
+POSTCSS_ESM = "export default {\n  plugins: { tailwindcss: {}, autoprefixer: {} },\n};\n"
+POSTCSS_CJS = "module.exports = {\n  plugins: { tailwindcss: {}, autoprefixer: {} },\n};\n"
 CSS_TW = "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nbody { background: #000; }\n"
 
+TSCONFIG_VITE = json.dumps({
+    "compilerOptions": {"target": "ES2020", "useDefineForClassFields": True,
+        "lib": ["ES2020", "DOM", "DOM.Iterable"], "module": "ESNext", "skipLibCheck": True,
+        "moduleResolution": "bundler", "allowImportingTsExtensions": True, "resolveJsonModule": True,
+        "isolatedModules": True, "noEmit": True, "jsx": "react-jsx", "strict": False,
+        "noUnusedLocals": False, "noUnusedParameters": False},
+    "include": ["src"]}, indent=2)
+TSCONFIG_NEXT = json.dumps({
+    "compilerOptions": {"target": "ES2017", "lib": ["dom", "dom.iterable", "esnext"], "allowJs": True,
+        "skipLibCheck": True, "strict": False, "noEmit": True, "esModuleInterop": True, "module": "esnext",
+        "moduleResolution": "bundler", "resolveJsonModule": True, "isolatedModules": True, "jsx": "preserve",
+        "incremental": True, "plugins": [{"name": "next"}], "paths": {"@/*": ["./*"]}},
+    "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"], "exclude": ["node_modules"]}, indent=2)
 
-def _copy_assets(out_dir, project_dir, dest="assets"):
-    src = Path(out_dir) / "assets"
+
+def _copy_assets(src_out, project_dir, dest):
+    src = Path(src_out) / "assets"
     dst = Path(project_dir) / "public" / dest
     if dst.exists():
         shutil.rmtree(dst)
@@ -485,190 +550,197 @@ def _copy_assets(out_dir, project_dir, dest="assets"):
     shutil.copytree(src, dst)
 
 
-def _api_hook(boards):
-    """Sinh 1 hook fetch stub de BE cam API."""
-    return (
-        '// Hook lay data cho landing tu API cua BE.\n'
-        '// Dien endpoint that va tra ve data theo dung shape cac *Data trong component.\n'
-        'import { useEffect, useState } from "react";\n\n'
-        'export function useLandingData() {\n'
-        '  const [data, setData] = useState(null);\n'
-        '  useEffect(() => {\n'
-        '    // TODO: thay bang API that\n'
-        '    // fetch("/api/landing").then((r) => r.json()).then(setData);\n'
-        '  }, []);\n'
-        '  return data;\n'
-        '}\n'
-    )
+def _write_landing_dir(base_dir, board, lang, client, stage_rel):
+    """Ghi 1 bo component landing (desktop hoac mobile) vao base_dir."""
+    base_dir.mkdir(parents=True, exist_ok=True)
+    ext = _ext(lang)
+    (base_dir / f"Layer.{ext}").write_text(_gen_layer(lang, client), encoding="utf-8")
+    (base_dir / f"Background.{ext}").write_text(_gen_background(board, lang, client), encoding="utf-8")
+    for sec in board["sections"]:
+        (base_dir / f"{sec['comp']}.{ext}").write_text(_gen_section(sec, lang, client), encoding="utf-8")
+        for rp in sec["repeats"]:
+            (base_dir / f"{rp['comp']}.{ext}").write_text(_gen_repeat(rp, lang, client), encoding="utf-8")
+    (base_dir / f"{board['landing_name']}.{ext}").write_text(
+        _gen_landing(board, lang, client, stage_rel), encoding="utf-8")
 
 
-# ---------- xuat REACT (Vite) ----------
+def _api_hook(lang):
+    ret = _ann(lang, "unknown")
+    return ('import { useEffect, useState } from "react";\n\n'
+            "// Hook lay data landing tu API cua BE. Dien endpoint that.\n"
+            "export function useLandingData() {\n"
+            f"  const [data, setData] = useState{('<unknown>' if lang=='ts' else '')}(null);\n"
+            "  useEffect(() => {\n"
+            "    // fetch('/api/landing').then((r) => r.json()).then(setData);\n"
+            "  }, []);\n  return data;\n}\n")
 
-def _responsive_body(boards, mobile):
-    """JSX than trang: neu co mobile -> an/hien theo breakpoint md."""
-    d = "\n        ".join(f"<{b['comp']} />" for b in boards)
-    if not mobile:
-        return d
-    m = "\n        ".join(f"<{b['comp']} />" for b in mobile["boards"])
-    return (f'<div className="hidden md:block">\n        {d}\n      </div>\n'
-            f'      <div className="block md:hidden">\n        {m}\n      </div>')
 
+# ---------- REACT (Vite) ----------
 
-def _export_react(out_dir, layout, boards, mobile=None):
+def _export_react(out_dir, layout, board, mobile, lang):
     proj = Path(out_dir) / "react-app"
-    (proj / "src" / "components").mkdir(parents=True, exist_ok=True)
-    all_boards = list(boards) + (mobile["boards"] if mobile else [])
-    for ab in all_boards:
-        (proj / "src" / "components" / f"{ab['comp']}.jsx").write_text(
-            _gen_component(ab, client=False), encoding="utf-8")
-    (proj / "src" / "components" / "Stage.jsx").write_text(STAGE_JSX, encoding="utf-8")
-    (proj / "src" / "useLandingData.js").write_text(_api_hook(all_boards), encoding="utf-8")
+    ext = _ext(lang)
+    src = proj / "src"
+    (src / "components").mkdir(parents=True, exist_ok=True)
+    (src / "components" / f"Stage.{ext}").write_text(_gen_stage(lang, client=False), encoding="utf-8")
+    _write_landing_dir(src / "components" / "landing", board, lang, False, "../Stage")
+    if mobile:
+        _write_landing_dir(src / "components" / "landing-mobile", mobile["board"], lang, False, "../Stage")
+    if lang == "ts":
+        (src / "types").mkdir(exist_ok=True)
+        (src / "types" / "landing.ts").write_text(_gen_types(), encoding="utf-8")
+        (src / "vite-env.d.ts").write_text('/// <reference types="vite/client" />\n', encoding="utf-8")
+    (src / f"useLandingData.{_dext(lang)}").write_text(_api_hook(lang), encoding="utf-8")
 
-    imports = "\n".join(f'import {b["comp"]} from "./components/{b["comp"]}";' for b in all_boards)
-    body = _responsive_body(boards, mobile)
-    (proj / "src" / "App.jsx").write_text(
-        f'import "./index.css";\n{imports}\n\n'
-        f'export default function App() {{\n  return (\n    <>\n      {body}\n    </>\n  );\n}}\n',
-        encoding="utf-8")
-    (proj / "src" / "index.css").write_text(CSS_TW, encoding="utf-8")
-    (proj / "src" / "main.jsx").write_text(
-        'import React from "react";\nimport { createRoot } from "react-dom/client";\n'
-        'import App from "./App";\n\ncreateRoot(document.getElementById("root")).render(<App />);\n',
-        encoding="utf-8")
+    imp = [f'import Landing from "./components/landing/{board["landing_name"]}";']
+    if mobile:
+        imp.append(f'import MLanding from "./components/landing-mobile/{mobile["board"]["landing_name"]}";')
+    body = ('<div className="hidden md:block"><Landing /></div>\n'
+            '      <div className="block md:hidden"><MLanding /></div>') if mobile else "<Landing />"
+    (src / f"App.{ext}").write_text(
+        'import "./index.css";\n' + "\n".join(imp) + "\n\n"
+        "export default function App() {\n  return (\n    <>\n      " + body + "\n    </>\n  );\n}\n", encoding="utf-8")
+    (src / "index.css").write_text(CSS_TW, encoding="utf-8")
+    nn = "!" if lang == "ts" else ""
+    (src / f"main.{ext}").write_text(
+        'import { createRoot } from "react-dom/client";\nimport App from "./App";\n\n'
+        f'createRoot(document.getElementById("root"){nn}).render(<App />);\n', encoding="utf-8")
     (proj / "index.html").write_text(
         '<!doctype html>\n<html lang="vi">\n<head>\n<meta charset="UTF-8"/>\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1.0"/>\n'
         f'<title>{layout.get("source","Landing")}</title>\n</head>\n<body>\n'
-        '<div id="root"></div>\n<script type="module" src="/src/main.jsx"></script>\n</body>\n</html>\n',
+        f'<div id="root"></div>\n<script type="module" src="/src/main.{ext}"></script>\n</body>\n</html>\n',
         encoding="utf-8")
     (proj / "vite.config.js").write_text(
         'import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\n\n'
         'export default defineConfig({ plugins: [react()] });\n', encoding="utf-8")
-    (proj / "tailwind.config.js").write_text(TAILWIND_CFG_REACT, encoding="utf-8")
-    (proj / "postcss.config.js").write_text(POSTCSS_CFG_ESM, encoding="utf-8")
+    (proj / "tailwind.config.js").write_text(TAILWIND_REACT, encoding="utf-8")
+    (proj / "postcss.config.js").write_text(POSTCSS_ESM, encoding="utf-8")
+    dev = {"@vitejs/plugin-react": "^4.3.1", "vite": "^5.4.0",
+           "tailwindcss": "^3.4.10", "postcss": "^8.4.41", "autoprefixer": "^10.4.20"}
+    if lang == "ts":
+        dev.update({"typescript": "^5.5.4", "@types/react": "^18.3.3", "@types/react-dom": "^18.3.0"})
+        (proj / "tsconfig.json").write_text(TSCONFIG_VITE, encoding="utf-8")
     (proj / "package.json").write_text(json.dumps({
-        "name": _slug(layout.get("source", "psd-landing")),
-        "private": True, "version": "0.1.0", "type": "module",
+        "name": _slug(layout.get("source", "psd-landing")), "private": True, "version": "0.1.0", "type": "module",
         "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
-        "dependencies": {"react": "^18.3.1", "react-dom": "^18.3.1"},
-        "devDependencies": {"@vitejs/plugin-react": "^4.3.1", "vite": "^5.4.0",
-                            "tailwindcss": "^3.4.10", "postcss": "^8.4.41", "autoprefixer": "^10.4.20"},
-    }, indent=2), encoding="utf-8")
+        "dependencies": {"react": "^18.3.1", "react-dom": "^18.3.1"}, "devDependencies": dev}, indent=2), encoding="utf-8")
     _copy_assets(out_dir, proj, "assets")
     if mobile:
         _copy_assets(mobile["dir"], proj, "assets-m")
-    _write_readme(proj, boards, "npm run dev", mobile)
+    _write_readme(proj, board, mobile, "npm run dev", lang)
     return proj
 
 
-# ---------- xuat NEXT ----------
+# ---------- NEXT ----------
 
-def _export_next(out_dir, layout, boards, mobile=None):
+def _export_next(out_dir, layout, board, mobile, lang):
     proj = Path(out_dir) / "next-app"
+    ext = _ext(lang)
     (proj / "app").mkdir(parents=True, exist_ok=True)
     (proj / "components").mkdir(parents=True, exist_ok=True)
-    (proj / "components" / "Stage.jsx").write_text('"use client";\n\n' + STAGE_JSX, encoding="utf-8")
-    boards_all = list(boards) + (mobile["boards"] if mobile else [])
-    for ab in boards_all:
-        (proj / "components" / f"{ab['comp']}.jsx").write_text(
-            _gen_component(ab, client=True), encoding="utf-8")
+    (proj / "components" / f"Stage.{ext}").write_text(_gen_stage(lang, client=True), encoding="utf-8")
+    _write_landing_dir(proj / "components" / "landing", board, lang, True, "../Stage")
+    if mobile:
+        _write_landing_dir(proj / "components" / "landing-mobile", mobile["board"], lang, True, "../Stage")
+    if lang == "ts":
+        (proj / "types").mkdir(exist_ok=True)
+        (proj / "types" / "landing.ts").write_text(_gen_types(), encoding="utf-8")
+        (proj / "next-env.d.ts").write_text(
+            '/// <reference types="next" />\n/// <reference types="next/image-types/global" />\n', encoding="utf-8")
     (proj / "lib").mkdir(exist_ok=True)
-    (proj / "lib" / "useLandingData.js").write_text('"use client";\n' + _api_hook(boards_all), encoding="utf-8")
+    (proj / "lib" / f"useLandingData.{_dext(lang)}").write_text('"use client";\n' + _api_hook(lang), encoding="utf-8")
 
     (proj / "app" / "globals.css").write_text(CSS_TW, encoding="utf-8")
-    (proj / "app" / "layout.jsx").write_text(
+    (proj / "app" / f"layout.{ext}").write_text(
         'import "./globals.css";\n\n'
         f'export const metadata = {{ title: "{layout.get("source","Landing")}" }};\n\n'
-        'export default function RootLayout({ children }) {\n'
+        f'export default function RootLayout({{ children }}{_ann(lang, "{ children: React.ReactNode }")}) {{\n'
         '  return (<html lang="vi"><body>{children}</body></html>);\n}\n', encoding="utf-8")
-    # Trang chu: render responsive desktop + mobile (board dau moi ben)
-    home_boards = [boards[0]] + ([mobile["boards"][0]] if mobile else [])
-    imports = "\n".join(f'import {b["comp"]} from "../components/{b["comp"]}";' for b in home_boards)
-    body = _responsive_body([boards[0]], {"boards": [mobile["boards"][0]]} if mobile else None)
-    (proj / "app" / "page.jsx").write_text(
-        f'{imports}\n\nexport default function Page() {{\n  return (\n    <>\n      {body}\n    </>\n  );\n}}\n',
+    imp = [f'import Landing from "../components/landing/{board["landing_name"]}";']
+    if mobile:
+        imp.append(f'import MLanding from "../components/landing-mobile/{mobile["board"]["landing_name"]}";')
+    body = ('<div className="hidden md:block"><Landing /></div>\n'
+            '      <div className="block md:hidden"><MLanding /></div>') if mobile else "<Landing />"
+    (proj / "app" / f"page.{ext}").write_text(
+        "\n".join(imp) + "\n\nexport default function Page() {\n  return (\n    <>\n      " + body + "\n    </>\n  );\n}\n",
         encoding="utf-8")
-    # Cac artboard khac (neu co) -> route rieng (chi desktop)
-    for b in boards[1:]:
-        d = proj / "app" / b["slug"]
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "page.jsx").write_text(
-            f'import {b["comp"]} from "../../components/{b["comp"]}";\n\n'
-            f'export default function Page() {{\n  return <{b["comp"]} />;\n}}\n', encoding="utf-8")
 
-    (proj / "next.config.js").write_text(
-        "/** @type {import('next').NextConfig} */\nmodule.exports = {};\n", encoding="utf-8")
-    (proj / "tailwind.config.js").write_text(TAILWIND_CFG_NEXT, encoding="utf-8")
-    (proj / "postcss.config.js").write_text(POSTCSS_CFG_CJS, encoding="utf-8")
+    (proj / "next.config.js").write_text("/** @type {import('next').NextConfig} */\nmodule.exports = {};\n", encoding="utf-8")
+    (proj / "tailwind.config.js").write_text(TAILWIND_NEXT, encoding="utf-8")
+    (proj / "postcss.config.js").write_text(POSTCSS_CJS, encoding="utf-8")
+    dev = {"tailwindcss": "^3.4.10", "postcss": "^8.4.41", "autoprefixer": "^10.4.20"}
+    if lang == "ts":
+        dev.update({"typescript": "^5.5.4", "@types/react": "^18.3.3", "@types/react-dom": "^18.3.0", "@types/node": "^20"})
+        (proj / "tsconfig.json").write_text(TSCONFIG_NEXT, encoding="utf-8")
     (proj / "package.json").write_text(json.dumps({
-        "name": _slug(layout.get("source", "psd-landing")),
-        "private": True, "version": "0.1.0",
+        "name": _slug(layout.get("source", "psd-landing")), "private": True, "version": "0.1.0",
         "scripts": {"dev": "next dev", "build": "next build", "start": "next start"},
         "dependencies": {"next": "^14.2.5", "react": "^18.3.1", "react-dom": "^18.3.1"},
-        "devDependencies": {"tailwindcss": "^3.4.10", "postcss": "^8.4.41", "autoprefixer": "^10.4.20"},
-    }, indent=2), encoding="utf-8")
+        "devDependencies": dev}, indent=2), encoding="utf-8")
     _copy_assets(out_dir, proj, "assets")
     if mobile:
         _copy_assets(mobile["dir"], proj, "assets-m")
-    _write_readme(proj, boards, "npm run dev", mobile)
+    _write_readme(proj, board, mobile, "npm run dev", lang)
     return proj
 
 
-def _write_readme(proj, boards, run_cmd, mobile=None):
-    reps = []
-    for b in boards:
-        for rp in b["repeats"]:
-            reps.append(f"- `{rp['comp']}` x{rp['count']} (data: `{rp['comp'][0].lower()+rp['comp'][1:]}Data`)")
-    rep_txt = "\n".join(reps) if reps else "- (khong phat hien cum lap)"
-    mob = ""
+def _write_readme(proj, board, mobile, run_cmd, lang):
+    lines = [f"# Export ({'TypeScript' if lang == 'ts' else 'JavaScript'})", "",
+             "```bash", "npm install", run_cmd, "```", "",
+             "## Cau truc component", "",
+             "- `components/Stage` - khung responsive (tu co gian).",
+             "- `components/landing/` - moi SECTION la 1 component rieng:"]
+    for sec in board["sections"]:
+        reps = ", ".join(rp["comp"] for rp in sec["repeats"])
+        lines.append(f"  - `{sec['comp']}`" + (f" (cum lap: {reps})" if reps else ""))
     if mobile:
-        mob = ("\n## Desktop / Mobile\n\n"
-               "Co ban design MOBILE rieng. Desktop hien tu breakpoint `md` tro len,\n"
-               "mobile hien duoi `md` (xem App.jsx / page.jsx). Component mobile co tien to `M`,\n"
-               "anh mobile o `public/assets-m`.\n")
-    (proj / "README.md").write_text(
-        f"# Export\n\n```bash\nnpm install\n{run_cmd}\n```\n{mob}\n"
-        "## Tich hop API\n\n"
-        "Cac cum lap da thanh component render bang `.map()` qua mang data:\n\n"
-        f"{rep_txt}\n\n"
-        "- Thay cac mang `*Data` bang data that tu BE (xem `useLandingData`).\n"
-        "- Nut nhan qua goi `onClaim(id)` - cam API vao ham nay trong component.\n"
-        "- O vat pham: dien `item.items = [{src,x,y,w,h}]` (toa do trong the).\n"
-        "- `item.claimed = true` -> hien lop mo danh dau da nhan.\n",
-        encoding="utf-8")
+        lines.append("- `components/landing-mobile/` - ban mobile rieng (hien duoi breakpoint md).")
+    lines += ["", "## Tich hop API",
+              "- Cac cum lap render bang `.map()` qua mang `*Data` trong file section - thay bang data BE.",
+              "- Nut 'Nhan Qua' goi `onClaim(id)` (sua trong Landing).",
+              "- O vat pham: dien `item.items = [{src,x,y,w,h}]`.",
+              "- `item.claimed = true` -> lop mo da nhan.",
+              "- Hook `useLandingData` de cam endpoint that."]
+    (proj / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+
+def _dext(lang):
+    return "ts" if lang == "ts" else "js"
+
+
+# ================= entry =================
 
 def _load_variant(vdir, asset_dir, comp_prefix):
     vdir = Path(vdir)
     layout = json.loads((vdir / "layout.json").read_text(encoding="utf-8"))
-    boards = _artboards_from_layout(layout, asset_dir, comp_prefix)
+    board = _artboards_from_layout(layout, asset_dir, comp_prefix)
     if not layout.get("artboards"):
-        boards[0]["H"] = _content_bottom_from_image(
+        board["H"] = _content_bottom_from_image(
             vdir / layout.get("screenshot", "screenshot.png"), layout["canvas"]["height"])
-    return layout, boards
+    _split_sections(board, layout)
+    return layout, board
 
 
-def export(out_dir, framework="react", mobile_dir=None):
+def export(out_dir, framework="react", lang="js", mobile_dir=None):
     out_dir = Path(out_dir)
-    layout, boards = _load_variant(out_dir, "assets", "")
+    if lang not in ("ts", "js"):
+        lang = "js"
+    layout, board = _load_variant(out_dir, "assets", "")
     mobile = None
     if mobile_dir:
-        m_layout, m_boards = _load_variant(mobile_dir, "assets-m", "M")
-        mobile = {"dir": Path(mobile_dir), "layout": m_layout, "boards": m_boards}
+        m_layout, m_board = _load_variant(mobile_dir, "assets-m", "M")
+        mobile = {"dir": Path(mobile_dir), "layout": m_layout, "board": m_board}
 
-    proj = _export_next(out_dir, layout, boards, mobile) if framework == "next" \
-        else _export_react(out_dir, layout, boards, mobile)
+    proj = _export_next(out_dir, layout, board, mobile, lang) if framework == "next" \
+        else _export_react(out_dir, layout, board, mobile, lang)
 
-    nrep = sum(len(b["repeats"]) for b in boards)
-    nflat = sum(len(b["flat"]) for b in boards)
-    tag = " + mobile" if mobile else ""
-    print(f"[{framework}{tag}] {len(boards)} trang, {nrep} cum lap, {nflat} anh phang -> {proj}")
-    for b in boards:
-        for rp in b["repeats"]:
-            print(f"    lap: {rp['comp']} x{rp['count']}")
-    if mobile:
-        mrep = sum(len(b['repeats']) for b in mobile['boards'])
-        print(f"    mobile: {len(mobile['boards'])} trang, {mrep} cum lap")
+    nsec = len(board["sections"])
+    nrep = sum(len(s["repeats"]) for s in board["sections"])
+    print(f"[{framework}/{lang}{' +mobile' if mobile else ''}] {nsec} section, {nrep} cum lap -> {proj}")
+    for s in board["sections"]:
+        tag = " (" + ", ".join(rp["comp"] + f" x{rp['count']}" for rp in s["repeats"]) + ")" if s["repeats"] else ""
+        print(f"    section {s['comp']}{tag}")
     return proj
 
 
@@ -676,4 +748,5 @@ if __name__ == "__main__":
     import sys
     d = sys.argv[1] if len(sys.argv) > 1 else "output"
     fw = sys.argv[2] if len(sys.argv) > 2 else "react"
-    export(d, fw)
+    lg = sys.argv[3] if len(sys.argv) > 3 else "js"
+    export(d, fw, lg)

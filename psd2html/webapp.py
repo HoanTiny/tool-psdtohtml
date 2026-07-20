@@ -37,7 +37,7 @@ def _new_job_id():
     return f"job{_counter[0]}"
 
 
-def _run(job_id, desktop_psd, mobile_psd, fmt):
+def _run(job_id, desktop_psd, mobile_psd, fmt, lang="js"):
     job = jobs[job_id]
     out = JOBS_DIR / job_id / "out"
     try:
@@ -57,7 +57,8 @@ def _run(job_id, desktop_psd, mobile_psd, fmt):
             zip_src = out
             zip_include = ["index.html", "style.css", "assets", "sections"]
         else:
-            proj = export_web(str(out), framework=fmt, mobile_dir=str(mobile_dir) if mobile_dir else None)
+            proj = export_web(str(out), framework=fmt, lang=lang,
+                              mobile_dir=str(mobile_dir) if mobile_dir else None)
             job["preview"] = None
             zip_src = Path(proj)
             zip_include = None  # zip toan bo project
@@ -104,6 +105,9 @@ def convert():
     fmt = request.form.get("format", "slices")
     if fmt not in ("slices", "react", "next"):
         fmt = "slices"
+    lang = request.form.get("lang", "js")
+    if lang not in ("js", "ts"):
+        lang = "js"
 
     job_id = _new_job_id()
     jdir = JOBS_DIR / job_id
@@ -118,9 +122,9 @@ def convert():
         m_path = jdir / secure_filename(mobile.filename)
         mobile.save(m_path)
 
-    jobs[job_id] = {"status": "running", "step": "Bat dau...", "format": fmt,
+    jobs[job_id] = {"status": "running", "step": "Bat dau...", "format": fmt, "lang": lang,
                     "error": None, "preview": None, "download": None, "files": []}
-    threading.Thread(target=_run, args=(job_id, d_path, m_path, fmt), daemon=True).start()
+    threading.Thread(target=_run, args=(job_id, d_path, m_path, fmt, lang), daemon=True).start()
     return jsonify({"job_id": job_id})
 
 
@@ -211,6 +215,16 @@ INDEX_HTML = """<!doctype html>
       <label><input type="radio" name="fmt" value="react"><span>React + Tailwind</span></label>
       <label><input type="radio" name="fmt" value="next"><span>Next.js</span></label>
     </div>
+  </div>
+  <div class="row" id="langRow" style="display:none">
+    <span style="color:var(--muted);font-size:14px">Ngon ngu:</span>
+    <div class="fmt">
+      <label><input type="radio" name="lang" value="js" checked><span>JavaScript</span></label>
+      <label><input type="radio" name="lang" value="ts"><span>TypeScript</span></label>
+    </div>
+    <span style="color:var(--muted);font-size:13px">+ chia nho theo section, de maintain</span>
+  </div>
+  <div class="row">
     <button id="go">Chuyen doi</button>
   </div>
 
@@ -236,13 +250,20 @@ function setupDrop(dropId, inputId, nameId, set){
 setupDrop("dropD","fileD","nameD",f=>fileD=f);
 setupDrop("dropM","fileM","nameM",f=>fileM=f);
 
+// hien bo chon ngon ngu khi chon React/Next
+document.querySelectorAll('input[name=fmt]').forEach(r=>r.addEventListener('change',()=>{
+  const f=document.querySelector('input[name=fmt]:checked').value;
+  document.getElementById('langRow').style.display = (f==='react'||f==='next') ? 'flex' : 'none';
+}));
+
 const panel=document.getElementById("panel"), stepEl=document.getElementById("step"),
       progress=document.getElementById("progress"), result=document.getElementById("result"), go=document.getElementById("go");
 
 go.onclick=async()=>{
   if(!fileD){ alert("Hay chon file PSD desktop truoc"); return; }
   const fmt=document.querySelector('input[name=fmt]:checked').value;
-  const fd=new FormData(); fd.append("desktop",fileD); if(fileM) fd.append("mobile",fileM); fd.append("format",fmt);
+  const lang=(document.querySelector('input[name=lang]:checked')||{}).value||'js';
+  const fd=new FormData(); fd.append("desktop",fileD); if(fileM) fd.append("mobile",fileM); fd.append("format",fmt); fd.append("lang",lang);
   go.disabled=true; panel.classList.add("show"); progress.style.display="block"; result.style.display="none"; stepEl.textContent="Tai file len...";
   let r;
   try{ r=await (await fetch("/convert",{method:"POST",body:fd})).json(); }
