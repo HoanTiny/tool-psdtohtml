@@ -97,6 +97,53 @@ def _ann(lang, t):
 
 # ================= phat hien group lap =================
 
+def _grid_of(instances, W, H):
+    """Suy ra luoi flex-wrap tu vi tri cac instance: goc, gap ngang/doc, so cot.
+
+    Cho phep cum lap render bang display:flex;flex-wrap thay vi tung the absolute
+    -> tu xep lai hang khi so item doi hoac man hep (giong ban production)."""
+    xs = [it["x"] for it in instances]
+    ys = [it["y"] for it in instances]
+    x0, y0 = min(xs), min(ys)
+    # gom instance theo HANG (tolerance = 40% chieu cao the)
+    tol = max(8, H * 0.4)
+    rows = []
+    for it in sorted(instances, key=lambda i: i["y"]):
+        for r in rows:
+            if abs(r[0]["y"] - it["y"]) <= tol:
+                r.append(it)
+                break
+        else:
+            rows.append([it])
+    cols = max(len(r) for r in rows)
+    # gap NGANG = trung vi khoang cach 2 the lien tiep trong 1 hang - W
+    gxs = []
+    for r in rows:
+        r.sort(key=lambda i: i["x"])
+        for i in range(len(r) - 1):
+            g = r[i + 1]["x"] - r[i]["x"] - W
+            if g > -4:
+                gxs.append(g)
+    # gap DOC = trung vi khoang cach 2 hang lien tiep - H
+    rys = sorted(min(i["y"] for i in r) for r in rows)
+    gys = [rys[i + 1] - rys[i] - H for i in range(len(rys) - 1) if rys[i + 1] - rys[i] - H > -4]
+    med = lambda a: round(sorted(a)[len(a) // 2]) if a else 0
+    gx = max(0, med(gxs))
+    gy = max(0, med(gys)) if gys else gx
+    width = cols * W + (cols - 1) * gx
+    # co phai LUOI DEU khong? (chi luoi deu moi chuyen flex-wrap an toan)
+    # -> moi hang tru hang cuoi phai DAY (= cols), hang cuoi <= cols, cac hang cach deu.
+    rows.sort(key=lambda r: min(i["y"] for i in r))
+    is_grid = True
+    if len(rows) > 1:
+        if any(len(r) != cols for r in rows[:-1]) or len(rows[-1]) > cols:
+            is_grid = False
+        elif len(gys) and (max(gys) - min(gys)) > 0.5 * H + 8:
+            is_grid = False   # hang khong cach deu -> so le/zigzag
+    return {"x": round(x0), "y": round(y0), "w": round(width),
+            "gx": gx, "gy": gy, "cols": cols, "is_grid": is_grid}
+
+
 def _detect_repeats(layout, ab_bbox, by_id, children, asset_dir="assets"):
     ax, ay = ab_bbox["x"], ab_bbox["y"]
     groups = [l for l in layout["layers"] if l.get("kind") == "group"]
@@ -175,7 +222,8 @@ def _detect_repeats(layout, ab_bbox, by_id, children, asset_dir="assets"):
                               "x": m["bbox"]["x"] - ax, "y": m["bbox"]["y"] - ay, "vars": vars_})
 
         repeats.append({"comp": comp, "W": tpl_m["bbox"]["width"], "H": tpl_m["bbox"]["height"],
-                        "slots": slots, "instances": instances, "count": len(instances)})
+                        "slots": slots, "instances": instances, "count": len(instances),
+                        "grid": _grid_of(instances, tpl_m["bbox"]["width"], tpl_m["bbox"]["height"])})
         for m in members:
             consumed_groups.add(m["id"])
             for gid in _descendant_groups(m["id"], by_id, children):
@@ -579,9 +627,13 @@ def _gen_repeat(rp, lang, client):
     imp = 'import type { RepeatItem } from "../../types/landing";\n\n' if lang == "ts" else ""
     sig = ("{ item, onClaim }: { item: RepeatItem; onClaim?: (id: number) => void }"
            if lang == "ts" else "{ item, onClaim }")
+    if rp["grid"].get("is_grid"):
+        root = f'    <div className="relative shrink-0" style={{{{ width: {rp["W"]}, height: {rp["H"]} }}}}>'
+    else:  # cum bat quy tac (so le) -> giu absolute theo item.x/item.y
+        root = (f'    <div className="absolute" style={{{{ left: item.x, top: item.y, '
+                f'width: {rp["W"]}, height: {rp["H"]} }}}}>')
     L = [head + imp, f"export default function {rp['comp']}({sig}) {{",
-         "  return (",
-         f'    <div className="absolute" style={{{{ left: item.x, top: item.y, width: {rp["W"]}, height: {rp["H"]} }}}}>']
+         "  return (", root]
     for sl in rp["slots"]:
         style = (f'{{{{ left: {sl["rx"]}, top: {sl["ry"]}, width: {sl["w"]}, height: {sl["h"]}, opacity: {sl["o"]}'
                  + (f', mixBlendMode: "{sl["blend"]}"' if sl.get("blend") else "") + " }}")
@@ -640,9 +692,20 @@ def _gen_section(sec, lang, client):
     body.append("      ))}")
     for rp in sec["repeats"]:
         var = rp["comp"][0].lower() + rp["comp"][1:] + "Data"
-        body.append(f"      {{{var}.map((it) => (")
-        body.append(f'        <{rp["comp"]} key={{it.id}} item={{it}} onClaim={{onClaim}} />')
-        body.append("      ))}")
+        g = rp["grid"]
+        if g.get("is_grid"):
+            # Cum LUOI DEU = container FLEX-WRAP (bo tung the absolute) -> tu xep lai hang.
+            body.append(f'      <div style={{{{ position: "absolute", left: {g["x"]}, top: {g["y"] - y0}, '
+                        f'width: {g["w"]}, display: "flex", flexWrap: "wrap", justifyContent: "center", '
+                        f'alignContent: "flex-start", gap: "{g["gy"]}px {g["gx"]}px" }}}}>')
+            body.append(f"        {{{var}.map((it) => (")
+            body.append(f'          <{rp["comp"]} key={{it.id}} item={{it}} onClaim={{onClaim}} />')
+            body.append("        ))}")
+            body.append("      </div>")
+        else:  # cum bat quy tac -> the tu dinh vi absolute (khong bao container)
+            body.append(f"      {{{var}.map((it) => (")
+            body.append(f'        <{rp["comp"]} key={{it.id}} item={{it}} onClaim={{onClaim}} />')
+            body.append("      ))}")
     body += ["    </>", "  );", "}", ""]
     return "\n".join(blocks) + "\n".join(body)
 
@@ -659,7 +722,7 @@ _LANDING_EFFECT = r'''  useEffect(() => {
       const h = (e) => { e.preventDefault();
         const t = secs[Math.min(i, secs.length - 1)];
         if (t) window.scrollTo({ top: Math.max(0, topOf(t) - 4), behavior: "smooth" }); };
-      n.addEventListener("click", h); return [n, h];
+      n.addEventListener("click", h); return { n, h };
     });
     const onScroll = () => {
       const mid = window.scrollY + window.innerHeight * 0.4;
@@ -685,7 +748,7 @@ _LANDING_EFFECT = r'''  useEffect(() => {
     };
     document.addEventListener("click", onClick);
     return () => {
-      navHandlers.forEach(([n, h]) => n.removeEventListener("click", h));
+      navHandlers.forEach(({ n, h }) => n.removeEventListener("click", h));
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
       document.removeEventListener("click", onClick);
@@ -780,6 +843,140 @@ _LANDING_SWIPERLIB_EFFECT = r'''  useEffect(() => {
   }, []);
   useEffect(() => { const root = rootRef.current; if (root) Array.from(root.querySelectorAll(".navitem")).forEach((n, i) => n.classList.toggle("active", i === activeIndex)); }, [activeIndex]);
 '''
+
+
+def _pct(v, base):
+    """px -> chuoi phan tram (lam tron 3 so) de dinh vi tuong doi, co gian theo width."""
+    return f"{round(v / base * 100, 4)}%"
+
+
+def _fluid_slots(rp, item_ref, lang):
+    """JSX cac slot BEN TRONG 1 the (dinh vi % theo W/H the) - dung chung cho
+    the reflow (flex) va the trong canvas. item_ref = ten bien item ('it')."""
+    W, H = rp["W"], rp["H"]
+    out = []
+    for sl in rp["slots"]:
+        st = (f'{{ position: "absolute", left: "{_pct(sl["rx"], W)}", top: "{_pct(sl["ry"], H)}", '
+              f'width: "{_pct(sl["w"], W)}", height: "{_pct(sl["h"], H)}", opacity: {sl["o"]}'
+              + (f', mixBlendMode: "{sl["blend"]}"' if sl.get("blend") else "") + " }")
+        if sl["kind"] == "button":
+            out.append(f'        <button onClick={{() => onClaim && onClaim({item_ref}.id)}} title="{sl["alt"]}" '
+                       f'className="hot" style={{{st}}}>'
+                       f'<img src="{sl["asset"]}" alt="{sl["alt"]}" className="block w-full h-full" /></button>')
+        elif sl["kind"] == "var":
+            cond = (f'{item_ref}.{sl["var"]} ? <img className="block" style={{{st}}} src={{{item_ref}.{sl["var"]} as string}} alt="{sl["alt"]}" /> : null'
+                    if lang == "ts" else
+                    f'{item_ref}.{sl["var"]} && <img className="block" style={{{st}}} src={{{item_ref}.{sl["var"]}}} alt="{sl["alt"]}" />')
+            out.append(f'        {{{cond}}}')
+        else:
+            out.append(f'        <img className="block" style={{{st}}} src="{sl["asset"]}" alt="{sl["alt"]}" />')
+    return out
+
+
+def _gen_fluid_mobile(board, lang, client):
+    """Layout MOBILE co gian THAT (opt-in --fluid): section xep doc (flow), moi
+    section:
+      - Khong co luoi deu -> canvas ti le khoa (aspect-ratio), art dinh vi % ->
+        pixel-proportional, co theo be rong (giong desktop, chi khac scale).
+      - Co luoi deu -> backdrop scene + grid REFLOW: the dung clamp()+aspect-ratio,
+        flex-wrap tu be 4->2->1 cot theo viewport (giong ban production)."""
+    head = '"use client";\n\n' if client else ""
+    W, H = board["W"], board["H"]
+    secs = board["sections"]
+    ys = [s.get("y0", 0) for s in secs]
+    bands = [(ys[i], max(1, (ys[i + 1] if i + 1 < len(secs) else H) - ys[i])) for i in range(len(secs))]
+    bgs_all = board.get("backgrounds", [])
+
+    def in_band(it, y0, hb):
+        cy = it["y"] + it["h"] / 2
+        return y0 <= cy < y0 + hb
+
+    refann = "<HTMLDivElement>" if lang == "ts" else ""
+    L = [head + 'import { useEffect, useRef } from "react";\nimport { LINKS } from "../../landing.config";\n',
+         "// Layout mobile co gian (fluid): sinh boi che do --fluid. Desktop dung ban rieng.",
+         "export default function MobileFluid() {",
+         f"  const onClaim = (id{_ann(lang, 'number')}) => {{ console.log('claim', id); }};",
+         f"  const rootRef = useRef{refann}(null);",
+         "  useEffect(() => {",
+         "    const root = rootRef.current; if (!root) return;",
+         "    const onClick = (e) => { const a = (e.target" + (" as HTMLElement" if lang == "ts" else "")
+         + ').closest(".hot"); if (!a || !root.contains(a)) return;',
+         '      const act = a.getAttribute("data-action"); if (!act) return;',
+         "      const url = LINKS[act]; if (url) { e.preventDefault(); window.open(url, '_blank'); } };",
+         "    root.addEventListener('click', onClick);",
+         "    return () => root.removeEventListener('click', onClick);",
+         "  }, []);",
+         "  return (",
+         '    <div ref={rootRef} className="w-full bg-black">']
+
+    for i, sec in enumerate(secs):
+        y0, hb = bands[i]
+        grid_reps = [rp for rp in sec["repeats"] if rp["grid"].get("is_grid")]
+        flat = sec["flat"]
+        band_bgs = [b for b in bgs_all if in_band(b, y0, hb)]
+        # art (nen + flat + cum KHONG phai luoi) dat trong canvas ti le khoa
+        L.append(f'      <section className="relative w-full overflow-hidden" '
+                 f'style={{{{ aspectRatio: "{W} / {hb}" }}}}>')
+        for b in band_bgs:
+            bl = (f', mixBlendMode: "{b["blend"]}"' if b.get("blend") else "")
+            L.append(f'        <img src="{b["src"]}" alt="{b.get("alt","")}" loading="lazy" '
+                     f'className="absolute block" style={{{{ left: "{_pct(b["x"],W)}", top: "{_pct(b["y"]-y0,hb)}", '
+                     f'width: "{_pct(b["w"],W)}", height: "{_pct(b["h"],hb)}", opacity: {b.get("o",1)}{bl} }}}} />')
+        for it in flat:
+            act = it.get("act")
+            cls = "hot absolute block" if it.get("href") else "absolute block"
+            extra = f' data-action="{act}"' if act else ""
+            st = (f'{{ left: "{_pct(it["x"],W)}", top: "{_pct(it["y"]-y0,hb)}", '
+                  f'width: "{_pct(it["w"],W)}", height: "{_pct(it["h"],hb)}", opacity: {it.get("o",1)}'
+                  + (f', mixBlendMode: "{it["blend"]}"' if it.get("blend") else "") + " }")
+            L.append(f'        <img src="{it["src"]}" alt="{it.get("alt","")}"{extra} loading="lazy" '
+                     f'className="{cls}" style={{{st}}} />')
+        # cum KHONG phai luoi (zigzag) -> giu vi tri % trong canvas
+        for rp in sec["repeats"]:
+            if rp["grid"].get("is_grid"):
+                continue
+            rw, rh = rp["W"], rp["H"]
+            for inst in rp["instances"]:
+                box = (f'{{ position: "absolute", left: "{_pct(inst["x"],W)}", top: "{_pct(inst["y"]-y0,hb)}", '
+                       f'width: "{_pct(rw,W)}", aspectRatio: "{rw} / {rh}" }}')
+                L.append(f'        <div style={{{box}}}>')
+                # slot dinh vi % trong the; var thay bang src cua instance
+                for sl in rp["slots"]:
+                    st = (f'{{ position: "absolute", left: "{_pct(sl["rx"],rw)}", top: "{_pct(sl["ry"],rh)}", '
+                          f'width: "{_pct(sl["w"],rw)}", height: "{_pct(sl["h"],rh)}", opacity: {sl["o"]} }}')
+                    src = inst["vars"].get(sl.get("var"), sl["asset"]) if sl["kind"] == "var" else sl["asset"]
+                    if sl["kind"] == "button":
+                        L.append(f'          <button onClick={{() => onClaim && onClaim({inst["id"]})}} '
+                                 f'className="hot" style={{{st}}}><img src="{sl["asset"]}" alt="{sl["alt"]}" '
+                                 f'className="block w-full h-full" /></button>')
+                    else:
+                        L.append(f'          <img src="{src}" alt="{sl["alt"]}" className="block" style={{{st}}} />')
+                L.append('        </div>')
+        L.append('      </section>')
+        # cum LUOI DEU -> grid reflow that (duoi backdrop)
+        for rp in grid_reps:
+            data = []
+            for inst in rp["instances"]:
+                e = {"id": inst["id"]}
+                e.update(inst["vars"])
+                data.append(e)
+            var = rp["comp"][0].lower() + rp["comp"][1:] + "Data"
+            L.append(f'      {{/* {rp["count"]} phan tu - reflow theo viewport, thay bang data API */}}')
+            L.append(f'      {{(function(){{ const {var}{_ann(lang,"any[]")} = '
+                     f'{json.dumps(data, ensure_ascii=False)}; return (')
+            L.append('        <div className="w-full flex flex-wrap justify-center items-start gap-[3vw] px-3 py-6">')
+            L.append(f'          {{{var}.map((it) => (')
+            L.append(f'            <div key={{it.id}} className="relative shrink-0" '
+                     f'style={{{{ width: "clamp(120px, {round(100/(rp["grid"]["cols"]+0.3),2)}vw, {rp["W"]}px)", '
+                     f'aspectRatio: "{rp["W"]} / {rp["H"]}" }}}}>')
+            L += _fluid_slots(rp, "it", lang)
+            L.append('            </div>')
+            L.append('          ))}')
+            L.append('        </div>')
+            L.append('      ); })()}')
+
+    L += ['    </div>', '  );', '}', '']
+    return "\n".join(L)
 
 
 def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=None):
@@ -1031,6 +1228,9 @@ def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, f
             (base_dir / f"{rp['comp']}.{ext}").write_text(_gen_repeat(rp, lang, client), encoding="utf-8")
     (base_dir / f"{board['landing_name']}.{ext}").write_text(
         _gen_landing(board, lang, client, stage_rel, swiper=swiper, feats=feats), encoding="utf-8")
+    if feats.get("fluid"):
+        (base_dir / f"MobileFluid.{ext}").write_text(
+            _gen_fluid_mobile(board, lang, client), encoding="utf-8")
 
 
 def _api_hook(lang):
@@ -1073,10 +1273,19 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
         (proj / ".env").write_text(_gen_env(client=False), encoding="utf-8")
 
     imp = [f'import Landing from "./components/landing/{board["landing_name"]}";']
+    fluid = feats.get("fluid") and not mobile
     if mobile:
         imp.append(f'import MLanding from "./components/landing-mobile/{mobile["board"]["landing_name"]}";')
-    body = ('<div className="hidden md:block"><Landing /></div>\n'
-            '      <div className="block md:hidden"><MLanding /></div>') if mobile else "<Landing />"
+    elif fluid:
+        imp.append('import MobileFluid from "./components/landing/MobileFluid";')
+    if mobile:
+        body = ('<div className="hidden md:block"><Landing /></div>\n'
+                '      <div className="block md:hidden"><MLanding /></div>')
+    elif fluid:
+        body = ('<div className="hidden md:block"><Landing /></div>\n'
+                '      <div className="block md:hidden"><MobileFluid /></div>')
+    else:
+        body = "<Landing />"
     (src / f"App.{ext}").write_text(
         'import "./index.css";\n' + "\n".join(imp) + "\n\n"
         "export default function App() {\n  return (\n    <>\n      " + body + "\n    </>\n  );\n}\n", encoding="utf-8")
@@ -1151,10 +1360,19 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None)
         f'export default function RootLayout({{ children }}{_ann(lang, "{ children: React.ReactNode }")}) {{\n'
         '  return (<html lang="vi"><body>{children}</body></html>);\n}\n', encoding="utf-8")
     imp = [f'import Landing from "../components/landing/{board["landing_name"]}";']
+    fluid = feats.get("fluid") and not mobile
     if mobile:
         imp.append(f'import MLanding from "../components/landing-mobile/{mobile["board"]["landing_name"]}";')
-    body = ('<div className="hidden md:block"><Landing /></div>\n'
-            '      <div className="block md:hidden"><MLanding /></div>') if mobile else "<Landing />"
+    elif fluid:
+        imp.append('import MobileFluid from "../components/landing/MobileFluid";')
+    if mobile:
+        body = ('<div className="hidden md:block"><Landing /></div>\n'
+                '      <div className="block md:hidden"><MLanding /></div>')
+    elif fluid:
+        body = ('<div className="hidden md:block"><Landing /></div>\n'
+                '      <div className="block md:hidden"><MobileFluid /></div>')
+    else:
+        body = "<Landing />"
     (proj / "app" / f"page.{ext}").write_text(
         "\n".join(imp) + "\n\nexport default function Page() {\n  return (\n    <>\n      " + body + "\n    </>\n  );\n}\n",
         encoding="utf-8")

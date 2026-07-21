@@ -60,6 +60,9 @@ def main():
                     help="React/Next: link/API dat trong .env (VITE_APP_*) + constant, thay object LINKS.")
     ap.add_argument("--nav-menu", action="store_true",
                     help="React/Next: nav dang menu chu config duoc (ten muc, muc->section/popup).")
+    ap.add_argument("--fluid", action="store_true",
+                    help="React/Next: mobile CO GIAN THAT (section xep doc flow, cum luoi reflow "
+                         "4->2->1 cot theo viewport). Chi ap khi KHONG dung --mobile. Desktop giu nguyen.")
     ap.add_argument("--ai-enhance", action="store_true",
                     help="React/Next: nho AI 'prod-hoa' tung section (chu thuong->text that, CTA->button hover). Can ANTHROPIC_API_KEY (.env).")
     mode = ap.add_mutually_exclusive_group()
@@ -100,7 +103,7 @@ def main():
         from .export_web import export
         feats = {"swiper_lib": args.swiper_lib, "popups": args.popups,
                  "env_config": args.env_config, "nav_menu": args.nav_menu,
-                 "ai_enhance": args.ai_enhance}
+                 "ai_enhance": args.ai_enhance, "fluid": args.fluid}
         proj = export(args.out, framework=fw, lang=args.lang, mobile_dir=mobile_dir,
                       detect_repeats=args.repeats, swiper=args.swiper, feats=feats)
         print(f"\nHOAN TAT -> {proj}")

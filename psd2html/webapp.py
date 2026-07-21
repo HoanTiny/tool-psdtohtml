@@ -211,6 +211,7 @@ def _run_export(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m):
         else:
             proj = export_web(str(out), framework=fmt, lang=lang,
                               mobile_dir=str(mobile_dir) if has_mobile else None,
+                              detect_repeats=feats.get("fluid", False),
                               swiper=swiper, feats=feats)
             job["preview"] = None
             zip_src = Path(proj)
@@ -347,7 +348,7 @@ def export():
     swiper = _flag(data.get("swiper"))
     feats = {"swiper_lib": _flag(data.get("swiper_lib")), "popups": _flag(data.get("popups")),
              "env_config": _flag(data.get("env_config")), "nav_menu": _flag(data.get("nav_menu")),
-             "ai_enhance": _flag(data.get("ai_enhance"))}
+             "ai_enhance": _flag(data.get("ai_enhance")), "fluid": _flag(data.get("fluid"))}
     disabled_d = data.get("disabled_desktop") or []
     disabled_m = data.get("disabled_mobile") or []
 
@@ -553,6 +554,7 @@ INDEX_HTML = """<!doctype html>
         <label style="cursor:pointer"><input type="checkbox" id="env_config" style="margin-right:6px"><span>Config link/API bang .env (VITE_APP_*)</span></label>
         <label style="cursor:pointer"><input type="checkbox" id="nav_menu" style="margin-right:6px"><span>Nav chu + slideTo (config duoc)</span></label>
         <label style="cursor:pointer"><input type="checkbox" id="popups" style="margin-right:6px"><span>Popup stubs (login/the le/lich su/nap dau)</span></label>
+        <label style="cursor:pointer"><input type="checkbox" id="fluid" style="margin-right:6px"><span>&#128241; Mobile co gian that (section xep doc, luoi reflow 4&rarr;2&rarr;1 cot) - khong dung khi da co PSD mobile</span></label>
         <label style="cursor:pointer"><input type="checkbox" id="ai_enhance" style="margin-right:6px"><span>&#10024; AI prod-hoa (chu that + hover) - can API key trong .env</span></label>
       </div>
     </div>
@@ -770,7 +772,7 @@ goExport.onclick=async()=>{
   const body={ job_id:JOB, format:fmt, lang:lang,
     swiper:document.getElementById("swiper").checked,
     disabled_desktop:[...disabled.desktop], disabled_mobile:[...disabled.mobile] };
-  ["swiper_lib","env_config","nav_menu","popups","ai_enhance"].forEach(k=>body[k]=document.getElementById(k).checked);
+  ["swiper_lib","env_config","nav_menu","popups","ai_enhance","fluid"].forEach(k=>body[k]=document.getElementById(k).checked);
   goExport.disabled=true; exportPanel.classList.add("show");
   exProgress.style.display="block"; result.style.display="none"; exStep.textContent="Gui yeu cau...";
   let r;
