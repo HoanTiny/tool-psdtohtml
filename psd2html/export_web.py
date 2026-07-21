@@ -756,26 +756,29 @@ _LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef
 
 # useEffect cho che do SWIPER.JS THAT (thu vien swiper): scale slide + nav slideTo + nut.
 _LANDING_SWIPERLIB_EFFECT = r'''  useEffect(() => {
+    // Scope MOI truy van vao rootRef cua ban nay (desktop/mobile) - tranh 2 ban
+    // cung dung document.querySelectorAll(".slide-stage") roi giam scale len nhau.
+    const root = rootRef.current; if (!root) return;
     const N = __N__;
     const fit = () => { const s = Math.min(1, window.innerWidth / __W__);
-      document.querySelectorAll__QS__(".slide-stage").forEach((el) => { el.style.transform = `scale(${s})`; }); };
+      root.querySelectorAll__QS__(".slide-stage").forEach((el) => { el.style.transform = `scale(${s})`; }); };
     fit(); window.addEventListener("resize", fit);
     // Ep repaint: tranh slide bi DEN (layer scale khong duoc ve cho toi khi repaint).
-    const kick = () => { document.querySelectorAll__QS__(".slide-stage").forEach((el) => { el.style.transform = "none"; void el.offsetHeight; }); fit(); };
+    const kick = () => { root.querySelectorAll__QS__(".slide-stage").forEach((el) => { el.style.transform = "none"; void el.offsetHeight; }); fit(); };
     requestAnimationFrame(kick); setTimeout(kick, 300);
-    const navs = Array.from(document.querySelectorAll(".navitem"));
+    const navs = Array.from(root.querySelectorAll(".navitem"));
     const navH = navs.map((n, i) => { const h = (e) => { e.preventDefault();
       if (swiperRef.current) swiperRef.current.slideTo(Math.min(i, N - 1)); };
       n.addEventListener("click", h); return { n, h }; });
-    const onClick = (e) => { const a = (e.target__ASH__).closest(".hot"); if (!a) return; e.preventDefault();
+    const onClick = (e) => { const a = (e.target__ASH__).closest(".hot"); if (!a || !root.contains(a)) return; e.preventDefault();
       const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
       if (url) { window.open(url, "_blank"); return; }
       openAction(act); };
-    document.addEventListener("click", onClick);
+    root.addEventListener("click", onClick);
     return () => { window.removeEventListener("resize", fit);
-      navH.forEach(({ n, h }) => n.removeEventListener("click", h)); document.removeEventListener("click", onClick); };
+      navH.forEach(({ n, h }) => n.removeEventListener("click", h)); root.removeEventListener("click", onClick); };
   }, []);
-  useEffect(() => { Array.from(document.querySelectorAll(".navitem")).forEach((n, i) => n.classList.toggle("active", i === activeIndex)); }, [activeIndex]);
+  useEffect(() => { const root = rootRef.current; if (root) Array.from(root.querySelectorAll(".navitem")).forEach((n, i) => n.classList.toggle("active", i === activeIndex)); }, [activeIndex]);
 '''
 
 
@@ -849,10 +852,11 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         ash = " as HTMLElement" if lang == "ts" else ""
         L.append("  const [activeIndex, setActiveIndex] = useState(0);")
         L.append(f"  const swiperRef = useRef{refany}(null);")
+        L.append(f"  const rootRef = useRef{('<HTMLDivElement>' if lang == 'ts' else '')}(null);")
         L.append(_LANDING_SWIPERLIB_EFFECT.replace("__N__", str(len(secs))).replace("__W__", str(W))
                  .replace("__QS__", qs).replace("__ASH__", ash))
         L.append("  return (")
-        L.append("    <>")
+        L.append('    <div ref={rootRef}>')
         if nav_tag:
             L.append(f"      <{nav_tag} />")
         L.append('      <Swiper direction="vertical" slidesPerView={1} effect="fade" fadeEffect={{ crossFade: true }}')
@@ -871,7 +875,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
             L.append("        </SwiperSlide>")
         L.append("      </Swiper>")
         L.append(modal_block)
-        L += ["    </>", "  );", "}", ""]
+        L += ["    </div>", "  );", "}", ""]
     elif swiper:
         max_sec_h = max(b[1] for b in bands)
         L.append(_LANDING_SWIPER_EFFECT.replace("useRef(null)", f"useRef{refann}(null)").replace("__W__", str(W)))
@@ -1047,6 +1051,12 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
     proj = Path(out_dir) / "react-app"
     ext = _ext(lang)
     src = proj / "src"
+    # DON sach src cu truoc khi sinh - tranh lan file .jsx (JS) va .tsx (TS) trong
+    # cung thu muc: import khong duoi (vd "./Landing") se nap NHAM ban cu (Vite uu
+    # tien .jsx truoc .tsx) -> ra dung code cu. (node_modules/dist/package.json o
+    # ngoai src nen khong bi xoa.)
+    if src.exists():
+        shutil.rmtree(src, ignore_errors=True)
     (src / "components").mkdir(parents=True, exist_ok=True)
     (src / "components" / f"Stage.{ext}").write_text(_gen_stage(lang, client=False), encoding="utf-8")
     _write_landing_dir(src / "components" / "landing", board, lang, False, "../Stage", swiper=swiper, feats=feats)
@@ -1111,6 +1121,11 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None)
     feats = feats or {}
     proj = Path(out_dir) / "next-app"
     ext = _ext(lang)
+    # DON app/ + components/ cu (tranh lan .jsx/.tsx -> import khong duoi nap nham ban cu)
+    for d in ("app", "components", "types", "lib"):
+        p = proj / d
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
     (proj / "app").mkdir(parents=True, exist_ok=True)
     (proj / "components").mkdir(parents=True, exist_ok=True)
     (proj / "components" / f"Stage.{ext}").write_text(_gen_stage(lang, client=True), encoding="utf-8")
