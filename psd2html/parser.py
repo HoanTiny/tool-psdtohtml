@@ -37,28 +37,53 @@ from psd_tools.api.layers import Artboard
 
 from .sectionize import is_background
 
-# Dinh dang xuat asset: WEBP nhe hon PNG ~85-95% cho anh landing (giam giat khi tai).
-# Doi ve "png" qua bien moi truong PSD2HTML_ASSET_FMT=png neu can trong suot khong mat.
-ASSET_FMT = os.environ.get("PSD2HTML_ASSET_FMT", "webp").lower()
-WEBP_QUALITY = int(os.environ.get("PSD2HTML_WEBP_QUALITY", "92"))
-# Anh nho hon nguong dien tich nay -> luu WEBP LOSSLESS (chu/icon/logo cang sac,
-# file van nho). Anh lon (nen, nhan vat) -> lossy quality (nhe). 0 = tat lossless.
-WEBP_LOSSLESS_MAX_AREA = int(os.environ.get("PSD2HTML_WEBP_LOSSLESS_MAX", "300000"))
+# Cau hinh xuat asset (co the doi qua tham so parse_psd HOAC bien moi truong .env).
+# fmt: 'webp' (nhe, mac dinh) hoac 'png' (goc, net nhat, nang).
+# webp_quality: chat luong lossy cho anh lon (nen/nhan vat).
+# webp_lossless_max: anh nho hon dien tich nay -> WEBP LOSSLESS (chu/icon/logo cang sac).
+_ASSET_CFG = {"fmt": "webp", "quality": 92, "lossless_max": 300000}
+
+
+def _apply_asset_cfg(asset_fmt=None, webp_quality=None, webp_lossless_max=None):
+    """Cap nhat cau hinh asset: uu tien tham so truyen -> .env -> mac dinh."""
+    fmt = (asset_fmt or os.environ.get("PSD2HTML_ASSET_FMT", "webp")).lower()
+    q = int(webp_quality if webp_quality is not None else os.environ.get("PSD2HTML_WEBP_QUALITY", "92"))
+    lm = int(webp_lossless_max if webp_lossless_max is not None
+             else os.environ.get("PSD2HTML_WEBP_LOSSLESS_MAX", "300000"))
+    _ASSET_CFG.update(fmt="png" if fmt == "png" else "webp", quality=q, lossless_max=lm)
 
 
 def _save_asset(img, assets_dir, lid):
-    """Luu asset theo dinh dang cau hinh (webp mac dinh). Tra ve ten file (vd L3.webp)."""
-    if ASSET_FMT == "png":
+    """Luu asset theo cau hinh _ASSET_CFG. Tra ve ten file (vd L3.webp)."""
+    if _ASSET_CFG["fmt"] == "png":
         name = f"{lid}.png"
         img.save(assets_dir / name)
     else:
         name = f"{lid}.webp"
         w, h = img.size
-        if WEBP_LOSSLESS_MAX_AREA and w * h <= WEBP_LOSSLESS_MAX_AREA:
-            img.save(assets_dir / name, "WEBP", lossless=True, method=6)   # chu/icon/logo: sac net (nho nen nhanh)
+        if _ASSET_CFG["lossless_max"] and w * h <= _ASSET_CFG["lossless_max"]:
+            img.save(assets_dir / name, "WEBP", lossless=True, method=6)   # chu/icon/logo: sac net
         else:
-            img.save(assets_dir / name, "WEBP", quality=WEBP_QUALITY, method=4)  # nen/nhan vat: nhe + nhanh
+            img.save(assets_dir / name, "WEBP", quality=_ASSET_CFG["quality"], method=4)  # nen/nhan vat: nhe
     return name
+
+
+def _load_env():
+    """Nap .env o goc du an vao os.environ (de PSD2HTML_* trong .env co tac dung luc parse)."""
+    for base in (Path.cwd(), Path(__file__).resolve().parent.parent):
+        env = base / ".env"
+        if not env.exists():
+            continue
+        try:
+            for line in env.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    if k and v and k not in os.environ:
+                        os.environ[k] = v
+        except Exception:
+            pass
 
 
 def _overlay_ids(psd):
@@ -313,13 +338,16 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
         out.append(node)
 
 
-def parse_psd(psd_path, out_dir):
+def parse_psd(psd_path, out_dir, asset_fmt=None, webp_quality=None, webp_lossless_max=None):
     """
     Ham chinh cua Pha 1.
     psd_path: duong dan file .psd
     out_dir : thu muc xuat ket qua (se tao assets/, screenshot.png, layout.json)
+    asset_fmt/webp_quality/webp_lossless_max: chat luong anh (uu tien hon .env).
     Tra ve: duong dan file layout.json
     """
+    _load_env()
+    _apply_asset_cfg(asset_fmt, webp_quality, webp_lossless_max)
     psd_path = Path(psd_path)
     out_dir = Path(out_dir)
     assets_dir = out_dir / "assets"

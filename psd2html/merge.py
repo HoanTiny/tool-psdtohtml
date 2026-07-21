@@ -40,7 +40,8 @@ def _order_key(path):
     return Path(path).name.lower()
 
 
-def parse_and_merge(psd_paths, out_dir, gap=0, align="center"):
+def parse_and_merge(psd_paths, out_dir, gap=0, align="center",
+                    asset_fmt=None, webp_quality=None, webp_lossless_max=None):
     """
     Parse nhieu PSD roi ghep doc thanh 1 layout.json trong out_dir.
 
@@ -67,7 +68,7 @@ def parse_and_merge(psd_paths, out_dir, gap=0, align="center"):
         stem = Path(psd).stem
         sdir = sec_parse_dir / f"{i:02d}_{stem}"
         print(f"[merge] ({i + 1}/{len(psd_paths)}) parse section: {Path(psd).name}")
-        parse_psd(str(psd), str(sdir))
+        parse_psd(str(psd), str(sdir), asset_fmt, webp_quality, webp_lossless_max)
         layout = json.loads((sdir / "layout.json").read_text(encoding="utf-8"))
         parsed.append((i, stem, sdir, layout))
 

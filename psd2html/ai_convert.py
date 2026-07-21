@@ -25,6 +25,29 @@ from PIL import Image
 
 from .sectionize import split_sections, is_background
 
+
+def _load_env():
+    """
+    Doc file .env o thu muc goc du an -> nap vao os.environ (neu chua co).
+    De ANTHROPIC_API_KEY chi can dat 1 lan trong .env (da duoc .gitignore chan),
+    khong phai set bien moi truong moi lan chay. Khong ghi de bien da co san.
+    """
+    for base in (Path.cwd(), Path(__file__).resolve().parent.parent):
+        env = base / ".env"
+        if not env.exists():
+            continue
+        try:
+            for line in env.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k and v and k not in os.environ:
+                    os.environ[k] = v
+        except Exception:
+            pass
+
 # Model mac dinh: sonnet-5 (nhanh, re, du tot cho sinh code + doc anh).
 # Muon chat luong cao nhat co the doi sang "claude-opus-4-8".
 DEFAULT_MODEL = "claude-sonnet-5"
@@ -114,6 +137,7 @@ def convert(out_dir, model=DEFAULT_MODEL, api_key=None):
     layout = json.loads((out_dir / "layout.json").read_text(encoding="utf-8"))
     screenshot = out_dir / layout.get("screenshot", "screenshot.png")
 
+    _load_env()
     client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
 
     print(f"[AI] Gui thiet ke cho {model} ...")
@@ -244,6 +268,7 @@ def convert_sectioned(out_dir, model=DEFAULT_MODEL, api_key=None, target_h=1300,
         plate.crop((0, y0, layout["canvas"]["width"], y1)).convert("RGB").save(sec_dir / f"bg{i}.png")
         ref_crops[i] = full.crop((0, y0, layout["canvas"]["width"], y1))
 
+    _load_env()
     client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
 
     results = {}

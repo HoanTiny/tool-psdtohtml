@@ -561,7 +561,8 @@ def _gen_background(board, lang, client):
         "export default function Background() {\n  return (\n    <>\n"
         "      {bg.map((l) => (\n"
         '        <img key={l.id} src={l.src} alt={l.alt} className="absolute block" loading="lazy" decoding="async"\n'
-        "          style={{ left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o }} />\n"
+        "          style={{ left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o, mixBlendMode: (l.blend || undefined)"
+        + (' as any' if lang == "ts" else "") + " }} />\n"
         "      ))}\n    </>\n  );\n}\n")
 
 
@@ -600,6 +601,9 @@ def _gen_repeat(rp, lang, client):
 
 def _gen_section(sec, lang, client):
     head = '"use client";\n\n' if client else ""
+    # Neu section da duoc AI "prod-hoa" -> dung luon JSX do (chu that + hover + semantic).
+    if sec.get("ai_jsx"):
+        return head + sec["ai_jsx"] + "\n"
     # Toa do TRONG section (tru goc section) de boc trong container content-visibility.
     y0 = sec.get("y0", 0)
     imports = ['import Layer from "./Layer";']
@@ -1175,7 +1179,8 @@ def _dext(lang):
 
 # ================= entry =================
 
-def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False):
+def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False, feats=None, lang="js", model=None):
+    feats = feats or {}
     vdir = Path(vdir)
     layout = json.loads((vdir / "layout.json").read_text(encoding="utf-8"))
     # Thanh CO DINH (nav/logo lap giua cac section) -> tach thanh FixedNav, render 1 lan.
@@ -1200,6 +1205,14 @@ def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False):
         board["H"] = _content_bottom_from_image(
             vdir / layout.get("screenshot", "screenshot.png"), layout["canvas"]["height"])
     _split_sections(board, layout)
+    if feats.get("ai_enhance"):
+        try:
+            from .ai_enhance import enhance_board
+            from .ai_convert import DEFAULT_MODEL
+            print(f"[AI] Prod-hoa {len(board['sections'])} section bang AI ...")
+            enhance_board(vdir, board, lang=lang, model=model or DEFAULT_MODEL)
+        except Exception as e:
+            print(f"[AI] Bo qua enhance (loi): {e}")
     return layout, board
 
 
@@ -1213,10 +1226,10 @@ def export(out_dir, framework="react", lang="js", mobile_dir=None, detect_repeat
     if feats.get("swiper_lib"):
         swiper = True
     feats["swiper"] = swiper
-    layout, board = _load_variant(out_dir, "assets", "", detect_repeats)
+    layout, board = _load_variant(out_dir, "assets", "", detect_repeats, feats=feats, lang=lang)
     mobile = None
     if mobile_dir:
-        m_layout, m_board = _load_variant(mobile_dir, "assets-m", "M", detect_repeats)
+        m_layout, m_board = _load_variant(mobile_dir, "assets-m", "M", detect_repeats, feats=feats, lang=lang)
         mobile = {"dir": Path(mobile_dir), "layout": m_layout, "board": m_board}
 
     proj = _export_next(out_dir, layout, board, mobile, lang, swiper=swiper, feats=feats) if framework == "next" \
