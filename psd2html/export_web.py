@@ -740,7 +740,7 @@ _LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef
     deck.addEventListener("touchstart", onTS, { passive: true });
     deck.addEventListener("touchend", onTE);
     const navH = navs.map((n, i) => { const h = (e) => { e.preventDefault(); go(Math.min(i, N - 1)); };
-      n.addEventListener("click", h); return [n, h]; });
+      n.addEventListener("click", h); return { n, h }; });
     const onClick = (e) => { const a = e.target.closest(".hot"); if (!a || !deck.contains(a)) return; e.preventDefault();
       const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
       if (url) { window.open(url, "_blank"); return; }
@@ -748,7 +748,7 @@ _LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef
     document.addEventListener("click", onClick);
     return () => { window.removeEventListener("resize", fit); deck.removeEventListener("wheel", onWheel);
       window.removeEventListener("keydown", onKey); deck.removeEventListener("touchstart", onTS);
-      deck.removeEventListener("touchend", onTE); navH.forEach(([n, h]) => n.removeEventListener("click", h));
+      deck.removeEventListener("touchend", onTE); navH.forEach(({ n, h }) => n.removeEventListener("click", h));
       document.removeEventListener("click", onClick); };
   }, []);
 '''
@@ -760,17 +760,20 @@ _LANDING_SWIPERLIB_EFFECT = r'''  useEffect(() => {
     const fit = () => { const s = Math.min(1, window.innerWidth / __W__);
       document.querySelectorAll__QS__(".slide-stage").forEach((el) => { el.style.transform = `scale(${s})`; }); };
     fit(); window.addEventListener("resize", fit);
+    // Ep repaint: tranh slide bi DEN (layer scale khong duoc ve cho toi khi repaint).
+    const kick = () => { document.querySelectorAll__QS__(".slide-stage").forEach((el) => { el.style.transform = "none"; void el.offsetHeight; }); fit(); };
+    requestAnimationFrame(kick); setTimeout(kick, 300);
     const navs = Array.from(document.querySelectorAll(".navitem"));
     const navH = navs.map((n, i) => { const h = (e) => { e.preventDefault();
       if (swiperRef.current) swiperRef.current.slideTo(Math.min(i, N - 1)); };
-      n.addEventListener("click", h); return [n, h]; });
+      n.addEventListener("click", h); return { n, h }; });
     const onClick = (e) => { const a = (e.target__ASH__).closest(".hot"); if (!a) return; e.preventDefault();
       const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
       if (url) { window.open(url, "_blank"); return; }
       openAction(act); };
     document.addEventListener("click", onClick);
     return () => { window.removeEventListener("resize", fit);
-      navH.forEach(([n, h]) => n.removeEventListener("click", h)); document.removeEventListener("click", onClick); };
+      navH.forEach(({ n, h }) => n.removeEventListener("click", h)); document.removeEventListener("click", onClick); };
   }, []);
   useEffect(() => { Array.from(document.querySelectorAll(".navitem")).forEach((n, i) => n.classList.toggle("active", i === activeIndex)); }, [activeIndex]);
 '''
