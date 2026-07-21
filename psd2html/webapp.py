@@ -66,7 +66,7 @@ def _parse_input(psd_list, out_dir):
     return parse_and_merge([str(p) for p in psd_list], str(out_dir))
 
 
-def _run(job_id, desktop_psds, mobile_psds, fmt, lang="js"):
+def _run(job_id, desktop_psds, mobile_psds, fmt, lang="js", swiper=False, feats=None):
     job = jobs[job_id]
     out = JOBS_DIR / job_id / "out"
     if out.exists():                       # don ket qua cu (tranh lan file section cu)
@@ -84,13 +84,13 @@ def _run(job_id, desktop_psds, mobile_psds, fmt, lang="js"):
 
         job["step"] = "Sinh code..."
         if fmt == "slices":
-            render_slices(str(out))
+            render_slices(str(out), swiper=swiper)
             job["preview"] = f"/result/{job_id}/index.html"
             zip_src = out
             zip_include = ["index.html", "style.css", "assets", "sections"]
         else:
             proj = export_web(str(out), framework=fmt, lang=lang,
-                              mobile_dir=str(mobile_dir) if mobile_dir else None)
+                              mobile_dir=str(mobile_dir) if mobile_dir else None, swiper=swiper, feats=feats)
             job["preview"] = None
             zip_src = Path(proj)
             zip_include = None  # zip toan bo project
@@ -162,6 +162,11 @@ def convert():
     lang = request.form.get("lang", "js")
     if lang not in ("js", "ts"):
         lang = "js"
+    def _flag(name):
+        return request.form.get(name, "") in ("1", "true", "on", "yes")
+    swiper = _flag("swiper")
+    feats = {"swiper_lib": _flag("swiper_lib"), "popups": _flag("popups"),
+             "env_config": _flag("env_config"), "nav_menu": _flag("nav_menu")}
 
     job_id = _new_job_id()
     jdir = JOBS_DIR / job_id
@@ -173,7 +178,7 @@ def convert():
     jobs[job_id] = {"status": "running", "step": "Bat dau...", "format": fmt, "lang": lang,
                     "sections": len(d_paths),
                     "error": None, "preview": None, "download": None, "files": []}
-    threading.Thread(target=_run, args=(job_id, d_paths, m_paths, fmt, lang), daemon=True).start()
+    threading.Thread(target=_run, args=(job_id, d_paths, m_paths, fmt, lang, swiper, feats), daemon=True).start()
     return jsonify({"job_id": job_id})
 
 
@@ -276,6 +281,19 @@ INDEX_HTML = """<!doctype html>
     <span style="color:var(--muted);font-size:13px">+ chia nho theo section, de maintain</span>
   </div>
   <div class="row">
+    <label class="fmt" style="cursor:pointer"><input type="checkbox" id="swiper" style="margin-right:6px">
+      <span>Full-page (swiper): lan/vuot snap tung section</span></label>
+  </div>
+  <div id="reactOpts" style="display:none;margin:6px 0 4px">
+    <div style="color:var(--muted);font-size:13px;margin-bottom:6px">Tuy chon React/Next (bam prod):</div>
+    <div class="fmt" style="flex-direction:column;gap:8px;align-items:flex-start">
+      <label style="cursor:pointer"><input type="checkbox" id="swiper_lib" style="margin-right:6px"><span>Dung Swiper.js that (effect fade nhu prod)</span></label>
+      <label style="cursor:pointer"><input type="checkbox" id="env_config" style="margin-right:6px"><span>Config link/API bang .env (VITE_APP_*)</span></label>
+      <label style="cursor:pointer"><input type="checkbox" id="nav_menu" style="margin-right:6px"><span>Nav chu + slideTo (config duoc)</span></label>
+      <label style="cursor:pointer"><input type="checkbox" id="popups" style="margin-right:6px"><span>Popup stubs (login/the le/lich su/nap dau)</span></label>
+    </div>
+  </div>
+  <div class="row">
     <button id="go">Chuyen doi</button>
   </div>
 
@@ -313,7 +331,9 @@ setupDrop("dropM","fileM","nameM",()=>filesM,a=>filesM=a);
 // hien bo chon ngon ngu khi chon React/Next
 document.querySelectorAll('input[name=fmt]').forEach(r=>r.addEventListener('change',()=>{
   const f=document.querySelector('input[name=fmt]:checked').value;
-  document.getElementById('langRow').style.display = (f==='react'||f==='next') ? 'flex' : 'none';
+  const isRN = (f==='react'||f==='next');
+  document.getElementById('langRow').style.display = isRN ? 'flex' : 'none';
+  document.getElementById('reactOpts').style.display = isRN ? 'block' : 'none';
 }));
 
 const panel=document.getElementById("panel"), stepEl=document.getElementById("step"),
@@ -327,6 +347,9 @@ go.onclick=async()=>{
   filesD.forEach(f=>fd.append("desktop",f));
   filesM.forEach(f=>fd.append("mobile",f));
   fd.append("format",fmt); fd.append("lang",lang);
+  fd.append("swiper", document.getElementById("swiper").checked ? "1" : "0");
+  ["swiper_lib","env_config","nav_menu","popups"].forEach(function(k){
+    fd.append(k, document.getElementById(k).checked ? "1" : "0"); });
   go.disabled=true; panel.classList.add("show"); progress.style.display="block"; result.style.display="none"; stepEl.textContent="Tai file len...";
   let r;
   try{

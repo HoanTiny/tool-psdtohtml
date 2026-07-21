@@ -43,6 +43,17 @@ def main():
     ap.add_argument("--repeats", action="store_true",
                     help="React/Next: gom 'cum lap' thanh component .map() (API-ready). "
                          "Mac dinh TAT (render phang, khop thiet ke hon cho landing do hoa).")
+    ap.add_argument("--swiper", action="store_true",
+                    help="Che do full-page: lan/vuot snap tung section (nhu swiper), "
+                         "thay vi cuon xuong lien tuc. Dung cho slices/react/next.")
+    ap.add_argument("--swiper-lib", action="store_true",
+                    help="React/Next: dung thu vien Swiper.js that (effect fade nhu prod) thay fade tu viet.")
+    ap.add_argument("--popups", action="store_true",
+                    help="React/Next: sinh he popup (login/the le/lich su/nap dau) - dang stub.")
+    ap.add_argument("--env-config", action="store_true",
+                    help="React/Next: link/API dat trong .env (VITE_APP_*) + constant, thay object LINKS.")
+    ap.add_argument("--nav-menu", action="store_true",
+                    help="React/Next: nav dang menu chu config duoc (ten muc, muc->section/popup).")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--slices", action="store_true",
                       help="Cat anh truc tiep (pixel-perfect, KHONG dung AI) - hop landing nhieu do hoa")
@@ -65,7 +76,7 @@ def main():
     if args.slices:
         print("\n=== Cat anh truc tiep (khong dung AI) ===")
         from .render_slices import render
-        html_path = render(args.out)
+        html_path = render(args.out, swiper=args.swiper)
         print(f"\nHOAN TAT -> mo file: {html_path}")
         return
 
@@ -79,8 +90,10 @@ def main():
             _parse_input(args.mobile, mobile_dir, label="mobile")
         print(f"\n=== Xuat du an {fw.upper()}/{args.lang} (khong dung AI) ===")
         from .export_web import export
+        feats = {"swiper_lib": args.swiper_lib, "popups": args.popups,
+                 "env_config": args.env_config, "nav_menu": args.nav_menu}
         proj = export(args.out, framework=fw, lang=args.lang, mobile_dir=mobile_dir,
-                      detect_repeats=args.repeats)
+                      detect_repeats=args.repeats, swiper=args.swiper, feats=feats)
         print(f"\nHOAN TAT -> {proj}")
         return
 

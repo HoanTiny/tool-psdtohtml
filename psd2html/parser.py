@@ -40,7 +40,10 @@ from .sectionize import is_background
 # Dinh dang xuat asset: WEBP nhe hon PNG ~85-95% cho anh landing (giam giat khi tai).
 # Doi ve "png" qua bien moi truong PSD2HTML_ASSET_FMT=png neu can trong suot khong mat.
 ASSET_FMT = os.environ.get("PSD2HTML_ASSET_FMT", "webp").lower()
-WEBP_QUALITY = int(os.environ.get("PSD2HTML_WEBP_QUALITY", "85"))
+WEBP_QUALITY = int(os.environ.get("PSD2HTML_WEBP_QUALITY", "92"))
+# Anh nho hon nguong dien tich nay -> luu WEBP LOSSLESS (chu/icon/logo cang sac,
+# file van nho). Anh lon (nen, nhan vat) -> lossy quality (nhe). 0 = tat lossless.
+WEBP_LOSSLESS_MAX_AREA = int(os.environ.get("PSD2HTML_WEBP_LOSSLESS_MAX", "300000"))
 
 
 def _save_asset(img, assets_dir, lid):
@@ -50,7 +53,11 @@ def _save_asset(img, assets_dir, lid):
         img.save(assets_dir / name)
     else:
         name = f"{lid}.webp"
-        img.save(assets_dir / name, "WEBP", quality=WEBP_QUALITY, method=4)
+        w, h = img.size
+        if WEBP_LOSSLESS_MAX_AREA and w * h <= WEBP_LOSSLESS_MAX_AREA:
+            img.save(assets_dir / name, "WEBP", lossless=True, method=6)   # chu/icon/logo: sac net (nho nen nhanh)
+        else:
+            img.save(assets_dir / name, "WEBP", quality=WEBP_QUALITY, method=4)  # nen/nhan vat: nhe + nhanh
     return name
 
 

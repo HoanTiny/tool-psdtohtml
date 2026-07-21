@@ -20,6 +20,11 @@ output/
 output_*/
 _mobile/
 
+# Data test + source tham chieu (local, khong day len)
+psd_test/
+soure_template/
+source_temp/
+
 # Secret / env
 .env
 .env.*

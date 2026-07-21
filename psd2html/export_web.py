@@ -18,7 +18,7 @@ import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
-from .render_slices import _is_interactive, _content_bottom_from_image, _norm
+from .render_slices import _is_interactive, _content_bottom_from_image, _norm, _action_of
 from .sectionize import split_sections
 
 
@@ -233,6 +233,7 @@ def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id):
                 "x": b["x"] - ax, "y": b["y"] - ay, "w": b["width"], "h": b["height"],
                 "o": l.get("opacity", 1), "blend": l.get("blend"),
                 "alt": _alt_of(l), "href": "#" if _is_interactive(l) else None,
+                "act": _action_of(l) if _is_interactive(l) else None,
                 "t": l.get("kind") == "type"}
         if toggle_id and l["id"] == toggle_id:
             item["toggle"] = True
@@ -355,10 +356,10 @@ def _gen_types():
         "export interface LayerItem {\n"
         "  id: string; src: string; x: number; y: number; w: number; h: number;\n"
         "  o: number; blend?: string | null; alt?: string;\n"
-        "  href?: string | null; menu?: boolean; toggle?: boolean;\n}\n\n"
+        "  href?: string | null; act?: string | null; menu?: boolean; toggle?: boolean;\n}\n\n"
         "export interface FixedItem {\n"
         "  src: string; x: number; y: number; w: number; h: number;\n"
-        "  o: number; blend?: string | null; alt?: string; href?: string | null;\n}\n\n"
+        "  o: number; blend?: string | null; alt?: string; href?: string | null; nav?: number | null;\n}\n\n"
         "export interface SlotItem { src: string; x: number; y: number; w: number; h: number; alt?: string; }\n\n"
         "export interface RepeatItem {\n"
         "  id: number; x: number; y: number; claimed?: boolean;\n"
@@ -424,8 +425,9 @@ export default function FixedNav() {
       <div style={{ position: "absolute", top: 0, left: 0, width: __W__, transformOrigin: "top left", transform: `scale(${scale})` }}>
         {items.map((it, i) => {
           const st__STYLEANN__ = { position: "absolute", left: it.x, top: it.y, width: it.w, height: it.h, opacity: it.o, mixBlendMode: (it.blend || undefined)__BLENDCAST__, pointerEvents: "auto" };
-          return it.href ? (
-            <a key={i} href={it.href} title={it.alt} style={st}>
+          const isNav = it.nav != null;
+          return (isNav || it.href) ? (
+            <a key={i} href={it.href || "#"} data-nav={isNav ? it.nav : undefined} className={isNav ? "navitem" : undefined} title={it.alt} style={st}>
               <img src={it.src} alt={it.alt} style={{ width: "100%", height: "100%", display: "block" }} />
             </a>
           ) : (
@@ -451,6 +453,62 @@ export default function FixedNav() {
     return head + tpl
 
 
+def _gen_popups(lang, client):
+    """He popup stub (login/the le/lich su/nap dau...). type=null -> khong hien."""
+    head = '"use client";\n\n' if client else ""
+    sig = ("{ type, onClose }: { type: string | null; onClose: () => void }"
+           if lang == "ts" else "{ type, onClose }")
+    return head + (
+        'const TITLES = { login: "Đăng nhập", rules: "Thể lệ", history: "Lịch sử", napdau: "Nạp đầu", '
+        'topup: "Nạp thẻ", gift: "Nhận quà", check: "Kiểm tra", download: "Tải game", register: "Đăng ký", social: "Facebook" };\n'
+        'const DESCS = { login: "TODO: gắn form / OIDC đăng nhập tại đây.", '
+        'rules: "TODO: nội dung thể lệ sự kiện.", history: "TODO: lịch sử nhận quà (gọi API).", '
+        'napdau: "TODO: nội dung nạp đầu.", gift: "TODO: nhận quà (gọi API claim)." };\n\n'
+        f"export default function Popups({sig}) {{\n"
+        "  if (!type) return null;\n"
+        "  return (\n"
+        '    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}\n'
+        '      style={{ position: "fixed", inset: 0, background: "rgba(4,8,20,.72)", display: "flex",\n'
+        '        alignItems: "center", justifyContent: "center", zIndex: 3000 }}>\n'
+        '      <div style={{ position: "relative", background: "#111a2e", border: "1px solid #33507e",\n'
+        '        borderRadius: 16, padding: "30px 34px", maxWidth: 460, width: "90%", color: "#e8eeff", textAlign: "center" }}>\n'
+        '        <button onClick={onClose} style={{ position: "absolute", top: 8, right: 14,\n'
+        '          background: "none", border: 0, color: "#7d90b5", fontSize: 24, cursor: "pointer" }}>&times;</button>\n'
+        '        <h3 style={{ margin: "0 0 10px", fontSize: 20 }}>{TITLES[type] || "Thông báo"}</h3>\n'
+        '        <p style={{ margin: "0 0 20px", color: "#9db0d6", fontSize: 14, lineHeight: 1.5 }}>\n'
+        "          {DESCS[type] || ('Chức năng \"' + type + '\": cắm nội dung / API tại đây.')}</p>\n"
+        '        <button onClick={onClose} style={{ background: "linear-gradient(90deg,#2563eb,#3b82f6)",\n'
+        '          color: "#fff", border: 0, borderRadius: 9, padding: "11px 26px", fontWeight: 700, cursor: "pointer" }}>Đóng</button>\n'
+        "      </div>\n    </div>\n  );\n}\n")
+
+
+def _gen_navmenu(board, lang, client):
+    """Nav dang CHU (config duoc) - thay nav anh. Muc menu class 'navitem' de Landing wiring."""
+    head = '"use client";\n\n' if client else ""
+    fixed = board.get("fixed", [])
+    logo = max(fixed, key=lambda it: it["w"] * it["h"]) if fixed else None
+    navs = [it for it in fixed if it.get("alt") and 15 <= it["w"] <= 220 and 15 <= it["h"] <= 60]
+    navs.sort(key=lambda it: it["y"])
+    labels = [(_norm(it["alt"]).title() or "Menu") for it in navs] or ["Trang Chủ", "Mốc Quà", "Nạp Đầu"]
+    nav_data = json.dumps([{"label": l, "slide": i} for i, l in enumerate(labels)], ensure_ascii=False, indent=2)
+    logo_src = json.dumps(logo["src"]) if logo else '""'
+    ann = ": { label: string; slide: number }[]" if lang == "ts" else ""
+    return head + (
+        "// Sua ten muc / thu tu nav tai day. slide = so thu tu section (0..).\n"
+        f"export const NAV{ann} = {nav_data};\n"
+        f"const LOGO = {logo_src};\n\n"
+        "export default function NavMenu() {\n"
+        '  return (\n'
+        '    <div className="fixed top-4 left-6 z-[1000] flex flex-col items-center" style={{ pointerEvents: "none" }}>\n'
+        '      {LOGO ? <img src={LOGO} alt="logo" className="w-[150px] object-contain mb-4" style={{ pointerEvents: "auto" }} /> : null}\n'
+        '      <ul className="flex flex-col items-center gap-3" style={{ pointerEvents: "auto" }}>\n'
+        "        {NAV.map((it, i) => (\n"
+        '          <li key={i}>\n'
+        '            <button className="navitem font-bold text-white/85 hover:text-[#ffe07a] transition text-lg leading-tight text-center cursor-pointer"\n'
+        '              data-nav={i} style={{ textShadow: "0 2px 6px rgba(0,0,0,.6)", whiteSpace: "pre-line" }}>{it.label}</button>\n'
+        "          </li>\n        ))}\n      </ul>\n    </div>\n  );\n}\n")
+
+
 def _gen_layer(lang, client):
     head = '"use client";\n\n' if client else ""
     imp = 'import type { LayerItem } from "../../types/landing";\n\n' if lang == "ts" else ""
@@ -470,7 +528,7 @@ def _gen_layer(lang, client):
         "      </button>\n    );\n  }\n"
         "  if (l.menu && !menuOpen) return null;\n"
         "  return l.href ? (\n"
-        '    <a href={l.href} title={l.alt} className="absolute block cursor-pointer transition hover:brightness-110" style={style}>\n'
+        '    <a href={l.href} data-action={l.act || "other"} title={l.alt} className="hot absolute block" style={style}>\n'
         '      <img src={l.src} alt={l.alt} className="block w-full h-full" loading="lazy" decoding="async" />\n'
         "    </a>\n  ) : (\n"
         '    <img src={l.src} alt={l.alt} className="absolute block" style={style} loading="lazy" decoding="async" />\n  );\n}\n')
@@ -485,6 +543,8 @@ def _flat_json(items):
             o["blend"] = it["blend"]
         if it.get("href"):
             o["href"] = it["href"]
+        if it.get("act"):
+            o["act"] = it["act"]
         if it.get("menu"):
             o["menu"] = True
         if it.get("toggle"):
@@ -540,18 +600,21 @@ def _gen_repeat(rp, lang, client):
 
 def _gen_section(sec, lang, client):
     head = '"use client";\n\n' if client else ""
+    # Toa do TRONG section (tru goc section) de boc trong container content-visibility.
+    y0 = sec.get("y0", 0)
     imports = ['import Layer from "./Layer";']
     for rp in sec["repeats"]:
         imports.append(f'import {rp["comp"]} from "./{rp["comp"]}";')
     if lang == "ts":
         imports.append('import type { SectionProps, LayerItem, RepeatItem } from "../../types/landing";')
     blocks = [head + "\n".join(imports) + "\n"]
-    blocks.append(f"const flat{_ann(lang, 'LayerItem[]')} = {_flat_json(sec['flat'])};\n")
+    flat_rel = [{**it, "y": it["y"] - y0} for it in sec["flat"]]
+    blocks.append(f"const flat{_ann(lang, 'LayerItem[]')} = {_flat_json(flat_rel)};\n")
     for rp in sec["repeats"]:
         var = rp["comp"][0].lower() + rp["comp"][1:] + "Data"
         data = []
         for inst in rp["instances"]:
-            e = {"id": inst["id"], "x": inst["x"], "y": inst["y"]}
+            e = {"id": inst["id"], "x": inst["x"], "y": inst["y"] - y0}
             e.update(inst["vars"])
             e["claimed"] = False
             e["items"] = []
@@ -572,33 +635,308 @@ def _gen_section(sec, lang, client):
     return "\n".join(blocks) + "\n".join(body)
 
 
-def _gen_landing(board, lang, client, stage_rel="../Stage"):
+# useEffect lo TUONG TAC: click nut -> link/modal, nav cuon toi section + scroll-spy
+# + scroll-reveal. Dung getBoundingClientRect (tinh ca transform:scale cua Stage).
+_LANDING_EFFECT = r'''  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const navs = Array.from(document.querySelectorAll(".navitem"));
+    const secs = Array.from(root.querySelectorAll(".landing-sec"));
+    const topOf = (el) => el.getBoundingClientRect().top + window.scrollY;
+    const navHandlers = navs.map((n, i) => {
+      const h = (e) => { e.preventDefault();
+        const t = secs[Math.min(i, secs.length - 1)];
+        if (t) window.scrollTo({ top: Math.max(0, topOf(t) - 4), behavior: "smooth" }); };
+      n.addEventListener("click", h); return [n, h];
+    });
+    const onScroll = () => {
+      const mid = window.scrollY + window.innerHeight * 0.4;
+      const revealLine = window.scrollY + window.innerHeight * 0.88;
+      let cur = 0;
+      secs.forEach((s, i) => { const top = topOf(s);
+        if (top <= mid) cur = i;
+        if (top < revealLine) s.classList.add("in"); });
+      navs.forEach((n, i) => n.classList.toggle("active", i === cur));
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    onScroll();
+    const revealTimer = setTimeout(() => secs.forEach((s) => s.classList.add("in")), 2500);
+    const onClick = (e) => {
+      const a = e.target.closest(".hot");
+      if (!a || !root.contains(a)) return;
+      e.preventDefault();
+      const act = a.getAttribute("data-action") || "other";
+      const url = LINKS[act];
+      if (url) { window.open(url, "_blank"); return; }
+      openAction(act);
+    };
+    document.addEventListener("click", onClick);
+    return () => {
+      navHandlers.forEach(([n, h]) => n.removeEventListener("click", h));
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      document.removeEventListener("click", onClick);
+      clearTimeout(revealTimer);
+    };
+  }, []);
+'''
+
+_LANDING_MODAL = r'''      {modal && (
+        <div onClick={(e) => { if (e.target === e.currentTarget) setModal(null); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(4,8,20,.72)", display: "flex",
+            alignItems: "center", justifyContent: "center", zIndex: 3000 }}>
+          <div style={{ position: "relative", background: "#111a2e", border: "1px solid #33507e",
+            borderRadius: 16, padding: "30px 34px", maxWidth: 420, width: "90%", color: "#e8eeff", textAlign: "center" }}>
+            <button onClick={() => setModal(null)} style={{ position: "absolute", top: 8, right: 14,
+              background: "none", border: 0, color: "#7d90b5", fontSize: 24, cursor: "pointer" }}>&times;</button>
+            <h3 style={{ margin: "0 0 10px", fontSize: 20 }}>{modal.title}</h3>
+            <p style={{ margin: "0 0 20px", color: "#9db0d6", fontSize: 14, lineHeight: 1.5 }}>{modal.desc}</p>
+            <button onClick={() => setModal(null)} style={{ background: "linear-gradient(90deg,#2563eb,#3b82f6)",
+              color: "#fff", border: 0, borderRadius: 9, padding: "11px 26px", fontWeight: 700, cursor: "pointer" }}>Đóng</button>
+          </div>
+        </div>
+      )}'''
+
+
+# useEffect cho che do SWIPER full-page kieu FADE (crossfade nhu swiper effect:'fade').
+_LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef(null);
+  useEffect(() => {
+    const deck = ref.current, stage = stageRef.current;
+    if (!deck || !stage) return;
+    const navs = Array.from(document.querySelectorAll(".navitem"));
+    const secEls = Array.from(stage.querySelectorAll(".landing-sec"));
+    let s = 1, idx = 0, lock = false; const N = secEls.length;
+    const go = (i) => { idx = Math.max(0, Math.min(N - 1, i));
+      secEls.forEach((el, k) => el.classList.toggle("on", k === idx));
+      navs.forEach((n, k) => n.classList.toggle("active", k === Math.min(idx, navs.length - 1))); };
+    const fit = () => { s = Math.min(1, deck.clientWidth / __W__); stage.style.transform = `scale(${s})`; };
+    window.addEventListener("resize", fit); fit(); go(0);
+    const step = (d) => { if (lock) return; lock = true; setTimeout(() => (lock = false), 650); go(idx + d); };
+    const onWheel = (e) => { e.preventDefault(); if (Math.abs(e.deltaY) < 8) return; step(e.deltaY > 0 ? 1 : -1); };
+    deck.addEventListener("wheel", onWheel, { passive: false });
+    const onKey = (e) => { if (e.key === "ArrowDown" || e.key === "PageDown") { e.preventDefault(); step(1); }
+      else if (e.key === "ArrowUp" || e.key === "PageUp") { e.preventDefault(); step(-1); } };
+    window.addEventListener("keydown", onKey);
+    let ty = null;
+    const onTS = (e) => { ty = e.touches[0].clientY; };
+    const onTE = (e) => { if (ty == null) return; const dy = ty - e.changedTouches[0].clientY;
+      if (Math.abs(dy) > 40) step(dy > 0 ? 1 : -1); ty = null; };
+    deck.addEventListener("touchstart", onTS, { passive: true });
+    deck.addEventListener("touchend", onTE);
+    const navH = navs.map((n, i) => { const h = (e) => { e.preventDefault(); go(Math.min(i, N - 1)); };
+      n.addEventListener("click", h); return [n, h]; });
+    const onClick = (e) => { const a = e.target.closest(".hot"); if (!a || !deck.contains(a)) return; e.preventDefault();
+      const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
+      if (url) { window.open(url, "_blank"); return; }
+      openAction(act); };
+    document.addEventListener("click", onClick);
+    return () => { window.removeEventListener("resize", fit); deck.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKey); deck.removeEventListener("touchstart", onTS);
+      deck.removeEventListener("touchend", onTE); navH.forEach(([n, h]) => n.removeEventListener("click", h));
+      document.removeEventListener("click", onClick); };
+  }, []);
+'''
+
+
+# useEffect cho che do SWIPER.JS THAT (thu vien swiper): scale slide + nav slideTo + nut.
+_LANDING_SWIPERLIB_EFFECT = r'''  useEffect(() => {
+    const N = __N__;
+    const fit = () => { const s = Math.min(1, window.innerWidth / __W__);
+      document.querySelectorAll__QS__(".slide-stage").forEach((el) => { el.style.transform = `scale(${s})`; }); };
+    fit(); window.addEventListener("resize", fit);
+    const navs = Array.from(document.querySelectorAll(".navitem"));
+    const navH = navs.map((n, i) => { const h = (e) => { e.preventDefault();
+      if (swiperRef.current) swiperRef.current.slideTo(Math.min(i, N - 1)); };
+      n.addEventListener("click", h); return [n, h]; });
+    const onClick = (e) => { const a = (e.target__ASH__).closest(".hot"); if (!a) return; e.preventDefault();
+      const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
+      if (url) { window.open(url, "_blank"); return; }
+      openAction(act); };
+    document.addEventListener("click", onClick);
+    return () => { window.removeEventListener("resize", fit);
+      navH.forEach(([n, h]) => n.removeEventListener("click", h)); document.removeEventListener("click", onClick); };
+  }, []);
+  useEffect(() => { Array.from(document.querySelectorAll(".navitem")).forEach((n, i) => n.classList.toggle("active", i === activeIndex)); }, [activeIndex]);
+'''
+
+
+def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=None):
     head = '"use client";\n\n' if client else ""
     comp = board["landing_name"]
     has_fixed = bool(board.get("fixed"))
-    imports = ['import { useState } from "react";', f'import Stage from "{stage_rel}";',
-               'import Background from "./Background";']
-    if has_fixed:
-        imports.append('import FixedNav from "./FixedNav";')
-    for sec in board["sections"]:
+    W, H = board["W"], board["H"]
+    secs = board["sections"]
+    feats = feats or {}
+    swiper_lib = bool(feats.get("swiper_lib")) and bool(secs)
+    swiper = (swiper and bool(secs)) or swiper_lib
+    use_navmenu = bool(feats.get("nav_menu")) and has_fixed
+    nav_tag = "NavMenu" if use_navmenu else ("FixedNav" if has_fixed else None)
+    ys = [s.get("y0", 0) for s in secs]
+    bands = [(ys[i], max(1, (ys[i + 1] if i + 1 < len(secs) else H) - ys[i])) for i in range(len(secs))]
+
+    imports = ['import { useState, useEffect, useRef } from "react";',
+               'import { LINKS, LABELS } from "../../landing.config";']
+    if swiper_lib:  # dung thu vien Swiper.js that (giong prod)
+        imports.insert(1, 'import { Swiper, SwiperSlide } from "swiper/react";')
+        imports.insert(2, 'import { Mousewheel, EffectFade } from "swiper/modules";')
+        imports.insert(3, 'import "swiper/css";')
+        imports.insert(4, 'import "swiper/css/effect-fade";')
+    elif not swiper:  # swiper (fade tu viet) tu ve nen trong section, khong dung Stage/Background
+        imports.insert(1, f'import Stage from "{stage_rel}";')
+        imports.insert(2, 'import Background from "./Background";')
+    if nav_tag:
+        imports.append(f'import {nav_tag} from "./{nav_tag}";')
+    popups = bool(feats.get("popups"))
+    if popups:
+        imports.append('import Popups from "./Popups";')
+    for sec in secs:
         imports.append(f'import {sec["comp"]} from "./{sec["comp"]}";')
+
+    modal_ty = "<{ title: string; desc: string } | null>" if lang == "ts" else ""
+    pop_ty = "<string | null>" if lang == "ts" else ""
+    refann = "<HTMLDivElement>" if lang == "ts" else ""
     L = [head + "\n".join(imports) + "\n"]
     L.append(f"export default function {comp}() {{")
-    L.append(f"  const [menuOpen, setMenuOpen] = useState(false);")
-    L.append("  // TODO: goi API nhan qua o day (vd fetch POST /api/claim)")
+    L.append("  const [menuOpen, setMenuOpen] = useState(false);")
+    L.append(f"  const [modal, setModal] = useState{modal_ty}(null);")
     L.append(f"  const onClaim = (id{_ann(lang, 'number')}) => {{ console.log('claim', id); }};")
     L.append("  const onToggleMenu = () => setMenuOpen((o) => !o);")
     L.append("  const props = { onClaim, menuOpen, onToggleMenu };")
-    L.append("  return (")
-    L.append("    <>")
-    if has_fixed:
-        L.append("      <FixedNav />")
-    L.append(f"      <Stage width={{{board['W']}}} height={{{board['H']}}}>")
-    L.append("        <Background />")
-    for sec in board["sections"]:
-        L.append(f"        <{sec['comp']} {{...props}} />")
-    L += ["      </Stage>", "    </>", "  );", "}", ""]
+    if popups:
+        L.append(f"  const [popup, setPopup] = useState{pop_ty}(null);")
+        L.append("  const openAction = (act) => setPopup(act);  // mo popup theo loai nut")
+    else:
+        L.append("  const openAction = (act) => setModal({ title: LABELS[act] || \"Thông báo\", "
+                 "desc: 'Chức năng \"' + (LABELS[act] || act) + '\": điền URL vào LINKS.' + act + ' hoặc gọi API tại đây.' });")
+    modal_block = ("      <Popups type={popup} onClose={() => setPopup(null)} />" if popups else _LANDING_MODAL)
+
+    def _bg_imgs(y0, hb, indent):
+        """JSX cho cac layer nen thuoc section [y0, y0+hb) (toa do doi ve goc section)."""
+        out = []
+        for bg in board.get("backgrounds", []):
+            cy = bg["y"] + bg["h"] / 2
+            if not (y0 <= cy < y0 + hb):
+                continue
+            blend = f', mixBlendMode: {json.dumps(bg["blend"])}' if bg.get("blend") else ""
+            out.append(f'{indent}<img key={json.dumps(bg["id"])} src={json.dumps(bg["src"])} '
+                       f'alt={json.dumps(bg.get("alt", ""))} loading="lazy" decoding="async" '
+                       f'style={{{{ position: "absolute", left: {bg["x"]}, top: {bg["y"] - y0}, '
+                       f'width: {bg["w"]}, height: {bg["h"]}, opacity: {bg.get("o", 1)}{blend} }}}} />')
+        return out
+
+    if swiper_lib:
+        refany = "<any>" if lang == "ts" else ""
+        qs = "<HTMLElement>" if lang == "ts" else ""
+        ash = " as HTMLElement" if lang == "ts" else ""
+        L.append("  const [activeIndex, setActiveIndex] = useState(0);")
+        L.append(f"  const swiperRef = useRef{refany}(null);")
+        L.append(_LANDING_SWIPERLIB_EFFECT.replace("__N__", str(len(secs))).replace("__W__", str(W))
+                 .replace("__QS__", qs).replace("__ASH__", ash))
+        L.append("  return (")
+        L.append("    <>")
+        if nav_tag:
+            L.append(f"      <{nav_tag} />")
+        L.append('      <Swiper direction="vertical" slidesPerView={1} effect="fade" fadeEffect={{ crossFade: true }}')
+        L.append('        mousewheel={{ sensitivity: 0.3, thresholdDelta: 20, thresholdTime: 300, releaseOnEdges: true }}')
+        L.append('        modules={[Mousewheel, EffectFade]} className="w-full" style={{ height: "100dvh" }}')
+        L.append('        onSwiper={(sw) => { swiperRef.current = sw; }} onSlideChange={(sw) => setActiveIndex(sw.activeIndex)}>')
+        for i, sec in enumerate(secs):
+            y0, hb = bands[i]
+            L.append(f"        <SwiperSlide key={{{i}}}>")
+            L.append('          <div className="w-full flex items-center justify-center overflow-hidden" style={{ height: "100dvh" }}>')
+            L.append(f'            <div className="slide-stage" style={{{{ position: "relative", width: {W}, height: {hb}, transformOrigin: "center center" }}}}>')
+            L += _bg_imgs(y0, hb, "              ")
+            L.append(f"              <{sec['comp']} {{...props}} />")
+            L.append("            </div>")
+            L.append("          </div>")
+            L.append("        </SwiperSlide>")
+        L.append("      </Swiper>")
+        L.append(modal_block)
+        L += ["    </>", "  );", "}", ""]
+    elif swiper:
+        max_sec_h = max(b[1] for b in bands)
+        L.append(_LANDING_SWIPER_EFFECT.replace("useRef(null)", f"useRef{refann}(null)").replace("__W__", str(W)))
+        L.append("  return (")
+        L.append("    <>")
+        if nav_tag:
+            L.append(f"      <{nav_tag} />")
+        L.append('      <div ref={ref} className="deck" style={{ position: "fixed", inset: 0, overflow: "hidden", '
+                 'background: "#000", display: "flex", alignItems: "center", justifyContent: "center" }}>')
+        L.append(f'        <div ref={{stageRef}} style={{{{ position: "relative", width: {W}, height: {max_sec_h}, '
+                 'transformOrigin: "center center" }}>')
+        for i, sec in enumerate(secs):
+            y0, hb = bands[i]
+            L.append(f'          <div className="landing-sec" data-sec="{i}" style={{{{ position: "absolute", '
+                     f'left: 0, top: 0, width: {W}, height: {hb} }}}}>')
+            L += _bg_imgs(y0, hb, "            ")
+            L.append(f"            <{sec['comp']} {{...props}} />")
+            L.append("          </div>")
+        L.append("        </div>")
+        L.append("      </div>")
+        L.append(modal_block)
+        L += ["    </>", "  );", "}", ""]
+    else:
+        L.append(f"  const rootRef = useRef{refann}(null);")
+        L.append(_LANDING_EFFECT)
+        L.append("  return (")
+        L.append('    <div ref={rootRef}>')
+        if nav_tag:
+            L.append(f"      <{nav_tag} />")
+        L.append(f"      <Stage width={{{W}}} height={{{H}}}>")
+        L.append("        <Background />")
+        for i, sec in enumerate(secs):
+            y0, hb = bands[i]
+            rev = "" if i == 0 else " reveal"
+            L.append(f'        <div className="landing-sec{rev}" data-sec="{i}" style={{{{ position: "absolute", '
+                     f'left: 0, top: {y0}, width: {W}, height: {hb}, contentVisibility: "auto", '
+                     f'containIntrinsicSize: "{W}px {hb}px" }}}}>')
+            L.append(f"          <{sec['comp']} {{...props}} />")
+            L.append("        </div>")
+        L.append("      </Stage>")
+        L.append(modal_block)
+        L += ["    </div>", "  );", "}", ""]
     return "\n".join(L)
+
+
+# cac loai link/nut + nhan hien thi
+_LINK_KEYS = ["download", "login", "register", "topup", "gift", "rules", "history", "social", "check"]
+_LINK_LABELS = {"download": "Tải game", "login": "Đăng nhập", "register": "Đăng ký", "topup": "Nạp",
+                "gift": "Nhận quà", "rules": "Thể lệ", "history": "Lịch sử",
+                "social": "Facebook", "check": "Kiểm tra"}
+
+
+def _env_key(client, k):
+    """Ten bien moi truong: Next -> NEXT_PUBLIC_LINK_*, Vite -> VITE_APP_LINK_*."""
+    prefix = "NEXT_PUBLIC_LINK_" if client else "VITE_APP_LINK_"
+    return prefix + k.upper()
+
+
+def _gen_config(lang, env_config=False, client=False):
+    """File cau hinh LINK/LABEL. env_config=True -> doc tu bien moi truong (.env)."""
+    labels = ", ".join(f'{k}: "{_LINK_LABELS[k]}"' for k in _LINK_KEYS)
+    if not env_config:
+        links = ", ".join(f'{k}: ""' for k in _LINK_KEYS)
+        return (
+            "// Dien URL that vao LINKS (de trong -> nut se hien popup mau).\n"
+            f"export const LINKS = {{ {links} }};\n\n"
+            f"export const LABELS = {{ {labels} }};\n"
+        )
+    src = "process.env" if client else "import.meta.env"
+    links = ",\n".join(f'  {k}: {src}.{_env_key(client, k)} || ""' for k in _LINK_KEYS)
+    return (
+        "// Link/API doc tu bien moi truong (.env). Dien gia tri vao file .env.\n"
+        f"const E = {src};\n"
+        f"export const LINKS = {{\n{links},\n}};\n\n"
+        f"export const LABELS = {{ {labels} }};\n"
+    ).replace(src + ".", "E.")
+
+
+def _gen_env(client=False):
+    """Noi dung file .env mau (dien URL that)."""
+    head = ("# Next.js: bien cho client PHAI bat dau NEXT_PUBLIC_\n" if client
+            else "# Vite: bien cho client PHAI bat dau VITE_APP_\n")
+    return head + "\n".join(f"{_env_key(client, k)}=" for k in _LINK_KEYS) + "\n"
 
 
 # ================= cau hinh du an =================
@@ -609,7 +947,24 @@ TAILWIND_NEXT = ('/** @type {import(\'tailwindcss\').Config} */\nmodule.exports 
                  '  content: ["./app/**/*.{js,jsx,ts,tsx}", "./components/**/*.{js,jsx,ts,tsx}"],\n  theme: { extend: {} },\n  plugins: [],\n};\n')
 POSTCSS_ESM = "export default {\n  plugins: { tailwindcss: {}, autoprefixer: {} },\n};\n"
 POSTCSS_CJS = "module.exports = {\n  plugins: { tailwindcss: {}, autoprefixer: {} },\n};\n"
-CSS_TW = "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nbody { background: #000; }\n"
+CSS_TW = (
+    "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n"
+    "body { background: #000; }\n\n"
+    "/* Nut/lien ket bam: hover phong nhe + sang + glow */\n"
+    ".hot { cursor: pointer; transition: transform .18s ease, filter .18s ease; transform-origin: center; }\n"
+    ".hot:hover { transform: scale(1.06); filter: brightness(1.15) drop-shadow(0 0 14px rgba(255,214,120,.55)); z-index: 60; }\n"
+    ".hot:active { transform: scale(.98); }\n\n"
+    "/* Nav (fixed): hover + active (scroll-spy) */\n"
+    ".navitem { cursor: pointer; transition: transform .18s ease, filter .2s ease; transform-origin: center; }\n"
+    ".navitem:hover { transform: scale(1.1); filter: brightness(1.25); }\n"
+    ".navitem.active { color: #ffe07a; filter: brightness(1.4) drop-shadow(0 0 10px rgba(255,214,120,.85)); }\n\n"
+    "/* Scroll-reveal: section (tru section dau) fade-up khi vao man hinh */\n"
+    ".landing-sec.reveal { opacity: 0; transform: translateY(28px); transition: opacity .6s ease, transform .6s ease; }\n"
+    ".landing-sec.reveal.in { opacity: 1; transform: none; }\n\n"
+    "/* Swiper (full-page): section fade-in khi thanh active */\n"
+    ".deck .landing-sec { opacity: 0; transition: opacity .55s ease .15s; }\n"
+    ".deck .landing-sec.on { opacity: 1; }\n"
+)
 
 TSCONFIG_VITE = json.dumps({
     "compilerOptions": {"target": "ES2020", "useDefineForClassFields": True,
@@ -635,20 +990,26 @@ def _copy_assets(src_out, project_dir, dest):
     shutil.copytree(src, dst)
 
 
-def _write_landing_dir(base_dir, board, lang, client, stage_rel):
+def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, feats=None):
     """Ghi 1 bo component landing (desktop hoac mobile) vao base_dir."""
     base_dir.mkdir(parents=True, exist_ok=True)
     ext = _ext(lang)
     (base_dir / f"Layer.{ext}").write_text(_gen_layer(lang, client), encoding="utf-8")
     (base_dir / f"Background.{ext}").write_text(_gen_background(board, lang, client), encoding="utf-8")
+    feats = feats or {}
     if board.get("fixed"):
-        (base_dir / f"FixedNav.{ext}").write_text(_gen_fixednav(board, lang, client), encoding="utf-8")
+        if feats.get("nav_menu"):
+            (base_dir / f"NavMenu.{ext}").write_text(_gen_navmenu(board, lang, client), encoding="utf-8")
+        else:
+            (base_dir / f"FixedNav.{ext}").write_text(_gen_fixednav(board, lang, client), encoding="utf-8")
+    if feats.get("popups"):
+        (base_dir / f"Popups.{ext}").write_text(_gen_popups(lang, client), encoding="utf-8")
     for sec in board["sections"]:
         (base_dir / f"{sec['comp']}.{ext}").write_text(_gen_section(sec, lang, client), encoding="utf-8")
         for rp in sec["repeats"]:
             (base_dir / f"{rp['comp']}.{ext}").write_text(_gen_repeat(rp, lang, client), encoding="utf-8")
     (base_dir / f"{board['landing_name']}.{ext}").write_text(
-        _gen_landing(board, lang, client, stage_rel), encoding="utf-8")
+        _gen_landing(board, lang, client, stage_rel, swiper=swiper, feats=feats), encoding="utf-8")
 
 
 def _api_hook(lang):
@@ -664,20 +1025,25 @@ def _api_hook(lang):
 
 # ---------- REACT (Vite) ----------
 
-def _export_react(out_dir, layout, board, mobile, lang):
+def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None):
+    feats = feats or {}
     proj = Path(out_dir) / "react-app"
     ext = _ext(lang)
     src = proj / "src"
     (src / "components").mkdir(parents=True, exist_ok=True)
     (src / "components" / f"Stage.{ext}").write_text(_gen_stage(lang, client=False), encoding="utf-8")
-    _write_landing_dir(src / "components" / "landing", board, lang, False, "../Stage")
+    _write_landing_dir(src / "components" / "landing", board, lang, False, "../Stage", swiper=swiper, feats=feats)
     if mobile:
-        _write_landing_dir(src / "components" / "landing-mobile", mobile["board"], lang, False, "../Stage")
+        _write_landing_dir(src / "components" / "landing-mobile", mobile["board"], lang, False, "../Stage", swiper=swiper, feats=feats)
     if lang == "ts":
         (src / "types").mkdir(exist_ok=True)
         (src / "types" / "landing.ts").write_text(_gen_types(), encoding="utf-8")
         (src / "vite-env.d.ts").write_text('/// <reference types="vite/client" />\n', encoding="utf-8")
     (src / f"useLandingData.{_dext(lang)}").write_text(_api_hook(lang), encoding="utf-8")
+    (src / f"landing.config.{_dext(lang)}").write_text(
+        _gen_config(lang, feats.get("env_config"), client=False), encoding="utf-8")
+    if feats.get("env_config"):
+        (proj / ".env").write_text(_gen_env(client=False), encoding="utf-8")
 
     imp = [f'import Landing from "./components/landing/{board["landing_name"]}";']
     if mobile:
@@ -708,10 +1074,13 @@ def _export_react(out_dir, layout, board, mobile, lang):
     if lang == "ts":
         dev.update({"typescript": "^5.5.4", "@types/react": "^18.3.3", "@types/react-dom": "^18.3.0"})
         (proj / "tsconfig.json").write_text(TSCONFIG_VITE, encoding="utf-8")
+    deps = {"react": "^18.3.1", "react-dom": "^18.3.1"}
+    if feats.get("swiper_lib"):
+        deps["swiper"] = "^11.2.6"
     (proj / "package.json").write_text(json.dumps({
         "name": _slug(layout.get("source", "psd-landing")), "private": True, "version": "0.1.0", "type": "module",
         "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
-        "dependencies": {"react": "^18.3.1", "react-dom": "^18.3.1"}, "devDependencies": dev}, indent=2), encoding="utf-8")
+        "dependencies": deps, "devDependencies": dev}, indent=2), encoding="utf-8")
     _copy_assets(out_dir, proj, "assets")
     if mobile:
         _copy_assets(mobile["dir"], proj, "assets-m")
@@ -721,15 +1090,16 @@ def _export_react(out_dir, layout, board, mobile, lang):
 
 # ---------- NEXT ----------
 
-def _export_next(out_dir, layout, board, mobile, lang):
+def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None):
+    feats = feats or {}
     proj = Path(out_dir) / "next-app"
     ext = _ext(lang)
     (proj / "app").mkdir(parents=True, exist_ok=True)
     (proj / "components").mkdir(parents=True, exist_ok=True)
     (proj / "components" / f"Stage.{ext}").write_text(_gen_stage(lang, client=True), encoding="utf-8")
-    _write_landing_dir(proj / "components" / "landing", board, lang, True, "../Stage")
+    _write_landing_dir(proj / "components" / "landing", board, lang, True, "../Stage", swiper=swiper, feats=feats)
     if mobile:
-        _write_landing_dir(proj / "components" / "landing-mobile", mobile["board"], lang, True, "../Stage")
+        _write_landing_dir(proj / "components" / "landing-mobile", mobile["board"], lang, True, "../Stage", swiper=swiper, feats=feats)
     if lang == "ts":
         (proj / "types").mkdir(exist_ok=True)
         (proj / "types" / "landing.ts").write_text(_gen_types(), encoding="utf-8")
@@ -737,6 +1107,10 @@ def _export_next(out_dir, layout, board, mobile, lang):
             '/// <reference types="next" />\n/// <reference types="next/image-types/global" />\n', encoding="utf-8")
     (proj / "lib").mkdir(exist_ok=True)
     (proj / "lib" / f"useLandingData.{_dext(lang)}").write_text('"use client";\n' + _api_hook(lang), encoding="utf-8")
+    (proj / f"landing.config.{_dext(lang)}").write_text(
+        _gen_config(lang, feats.get("env_config"), client=True), encoding="utf-8")
+    if feats.get("env_config"):
+        (proj / ".env").write_text(_gen_env(client=True), encoding="utf-8")
 
     (proj / "app" / "globals.css").write_text(CSS_TW, encoding="utf-8")
     (proj / "app" / f"layout.{ext}").write_text(
@@ -760,10 +1134,13 @@ def _export_next(out_dir, layout, board, mobile, lang):
     if lang == "ts":
         dev.update({"typescript": "^5.5.4", "@types/react": "^18.3.3", "@types/react-dom": "^18.3.0", "@types/node": "^20"})
         (proj / "tsconfig.json").write_text(TSCONFIG_NEXT, encoding="utf-8")
+    ndeps = {"next": "^14.2.5", "react": "^18.3.1", "react-dom": "^18.3.1"}
+    if feats.get("swiper_lib"):
+        ndeps["swiper"] = "^11.2.6"
     (proj / "package.json").write_text(json.dumps({
         "name": _slug(layout.get("source", "psd-landing")), "private": True, "version": "0.1.0",
         "scripts": {"dev": "next dev", "build": "next build", "start": "next start"},
-        "dependencies": {"next": "^14.2.5", "react": "^18.3.1", "react-dom": "^18.3.1"},
+        "dependencies": ndeps,
         "devDependencies": dev}, indent=2), encoding="utf-8")
     _copy_assets(out_dir, proj, "assets")
     if mobile:
@@ -806,11 +1183,19 @@ def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False):
     fixed_items, drop_ids = detect_fixed_overlay(vdir, layout)
     board = _artboards_from_layout(layout, asset_dir, comp_prefix, extra_exclude=drop_ids,
                                    detect_repeats=detect_repeats)
-    board["fixed"] = [{
-        "src": _src(it["asset"], asset_dir), "x": it["x"], "y": it["y"],
-        "w": it["w"], "h": it["h"], "o": it.get("o", 1), "blend": it.get("blend"),
-        "alt": it.get("alt", ""), "href": it.get("href"),
-    } for it in fixed_items]
+    fx, navk = [], 0
+    for it in fixed_items:
+        # muc menu bam duoc: chu ngan (loai logo to, icon chuot cao, duong ke mong)
+        isnav = bool(it.get("alt")) and 15 <= it["w"] <= 220 and 15 <= it["h"] <= 60
+        fx.append({
+            "src": _src(it["asset"], asset_dir), "x": it["x"], "y": it["y"],
+            "w": it["w"], "h": it["h"], "o": it.get("o", 1), "blend": it.get("blend"),
+            "alt": it.get("alt", ""), "href": it.get("href"),
+            "nav": (navk if isnav else None),
+        })
+        if isnav:
+            navk += 1
+    board["fixed"] = fx
     if not layout.get("artboards"):
         board["H"] = _content_bottom_from_image(
             vdir / layout.get("screenshot", "screenshot.png"), layout["canvas"]["height"])
@@ -818,18 +1203,24 @@ def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False):
     return layout, board
 
 
-def export(out_dir, framework="react", lang="js", mobile_dir=None, detect_repeats=False):
+def export(out_dir, framework="react", lang="js", mobile_dir=None, detect_repeats=False,
+           swiper=False, feats=None):
     out_dir = Path(out_dir)
     if lang not in ("ts", "js"):
         lang = "js"
+    feats = dict(feats or {})
+    # swiper_lib (Swiper.js that) keo theo che do full-page
+    if feats.get("swiper_lib"):
+        swiper = True
+    feats["swiper"] = swiper
     layout, board = _load_variant(out_dir, "assets", "", detect_repeats)
     mobile = None
     if mobile_dir:
         m_layout, m_board = _load_variant(mobile_dir, "assets-m", "M", detect_repeats)
         mobile = {"dir": Path(mobile_dir), "layout": m_layout, "board": m_board}
 
-    proj = _export_next(out_dir, layout, board, mobile, lang) if framework == "next" \
-        else _export_react(out_dir, layout, board, mobile, lang)
+    proj = _export_next(out_dir, layout, board, mobile, lang, swiper=swiper, feats=feats) if framework == "next" \
+        else _export_react(out_dir, layout, board, mobile, lang, swiper=swiper, feats=feats)
 
     nsec = len(board["sections"])
     nrep = sum(len(s["repeats"]) for s in board["sections"])
