@@ -371,33 +371,39 @@ def _gen_types():
 
 def _gen_stage(lang, client):
     head = '"use client";\n\n' if client else ""
+    # Do bang document.documentElement.clientWidth (be rong viewport, tru scrollbar):
+    #   - Khong bi 0 khi component dang bi display:none (bug cu voi el.clientWidth).
+    #   - Khong dinh scrollbar (tranh tran ngang nhu window.innerWidth).
+    # Khoi tao scale NGAY tu dau (lazy initializer) -> khong nhap nhay tran o lan ve dau.
     if lang == "ts":
         return head + (
-            'import { useRef, useEffect, useState } from "react";\n'
+            'import { useEffect, useState } from "react";\n'
             'import type { ReactNode } from "react";\n\n'
+            "const calc = (w: number) =>\n"
+            '  typeof document !== "undefined" ? Math.min(1, document.documentElement.clientWidth / w) : 1;\n\n'
             "export default function Stage({ width, height, children }: "
             "{ width: number; height: number; children: ReactNode }) {\n"
-            "  const ref = useRef<HTMLDivElement>(null);\n"
-            "  const [scale, setScale] = useState(1);\n"
+            "  const [scale, setScale] = useState(() => calc(width));\n"
             "  useEffect(() => {\n"
-            "    const el = ref.current;\n    if (!el) return;\n"
-            "    const fit = () => setScale(Math.min(1, el.clientWidth / width));\n"
+            "    const fit = () => setScale(calc(width));\n"
             "    fit();\n    window.addEventListener('resize', fit);\n"
             "    return () => window.removeEventListener('resize', fit);\n  }, [width]);\n"
             "  return (\n"
-            '    <div ref={ref} className="w-full overflow-hidden" style={{ height: height * scale }}>\n'
+            '    <div className="w-full overflow-hidden" style={{ height: height * scale }}>\n'
             '      <div className="relative" style={{ width, height, transformOrigin: "top left", transform: `scale(${scale})` }}>\n'
             "        {children}\n      </div>\n    </div>\n  );\n}\n")
     return head + (
-        'import { useRef, useEffect, useState } from "react";\n\n'
+        'import { useEffect, useState } from "react";\n\n'
+        "const calc = (w) =>\n"
+        '  typeof document !== "undefined" ? Math.min(1, document.documentElement.clientWidth / w) : 1;\n\n'
         "export default function Stage({ width, height, children }) {\n"
-        "  const ref = useRef(null);\n  const [scale, setScale] = useState(1);\n"
-        "  useEffect(() => {\n    const el = ref.current;\n    if (!el) return;\n"
-        "    const fit = () => setScale(Math.min(1, el.clientWidth / width));\n"
+        "  const [scale, setScale] = useState(() => calc(width));\n"
+        "  useEffect(() => {\n"
+        "    const fit = () => setScale(calc(width));\n"
         "    fit();\n    window.addEventListener('resize', fit);\n"
         "    return () => window.removeEventListener('resize', fit);\n  }, [width]);\n"
         "  return (\n"
-        '    <div ref={ref} className="w-full overflow-hidden" style={{ height: height * scale }}>\n'
+        '    <div className="w-full overflow-hidden" style={{ height: height * scale }}>\n'
         '      <div className="relative" style={{ width, height, transformOrigin: "top left", transform: `scale(${scale})` }}>\n'
         "        {children}\n      </div>\n    </div>\n  );\n}\n")
 
@@ -412,10 +418,12 @@ __RIMP__
 const items__ITEMSANN__ = __DATA__;
 
 // Thanh dieu huong CO DINH - render 1 lan, tu co gian theo be rong man hinh.
+const calcNav = () =>
+  typeof document !== "undefined" ? Math.min(1, document.documentElement.clientWidth / __W__) : 1;
 export default function FixedNav() {
-  const [scale, setScale] = useState(1);
+  const [scale, setScale] = useState(calcNav);
   useEffect(() => {
-    const fit = () => setScale(Math.min(1, window.innerWidth / __W__));
+    const fit = () => setScale(calcNav());
     fit();
     window.addEventListener("resize", fit);
     return () => window.removeEventListener("resize", fit);
@@ -716,6 +724,9 @@ _LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef
       navs.forEach((n, k) => n.classList.toggle("active", k === Math.min(idx, navs.length - 1))); };
     const fit = () => { s = Math.min(1, deck.clientWidth / __W__); stage.style.transform = `scale(${s})`; };
     window.addEventListener("resize", fit); fit(); go(0);
+    // Ep repaint: layer scale khong duoc ve (section DEN) cho toi khi co nhip repaint.
+    const kick = () => { stage.style.transform = "none"; void stage.offsetHeight; fit(); };
+    requestAnimationFrame(kick); setTimeout(kick, 300);
     const step = (d) => { if (lock) return; lock = true; setTimeout(() => (lock = false), 650); go(idx + d); };
     const onWheel = (e) => { e.preventDefault(); if (Math.abs(e.deltaY) < 8) return; step(e.deltaY > 0 ? 1 : -1); };
     deck.addEventListener("wheel", onWheel, { passive: false });
@@ -849,7 +860,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
             y0, hb = bands[i]
             L.append(f"        <SwiperSlide key={{{i}}}>")
             L.append('          <div className="w-full flex items-center justify-center overflow-hidden" style={{ height: "100dvh" }}>')
-            L.append(f'            <div className="slide-stage" style={{{{ position: "relative", width: {W}, height: {hb}, transformOrigin: "center center" }}}}>')
+            L.append(f'            <div className="slide-stage" style={{{{ position: "relative", flexShrink: 0, width: {W}, height: {hb}, transformOrigin: "center center" }}}}>')
             L += _bg_imgs(y0, hb, "              ")
             L.append(f"              <{sec['comp']} {{...props}} />")
             L.append("            </div>")
@@ -867,7 +878,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
             L.append(f"      <{nav_tag} />")
         L.append('      <div ref={ref} className="deck" style={{ position: "fixed", inset: 0, overflow: "hidden", '
                  'background: "#000", display: "flex", alignItems: "center", justifyContent: "center" }}>')
-        L.append(f'        <div ref={{stageRef}} style={{{{ position: "relative", width: {W}, height: {max_sec_h}, '
+        L.append(f'        <div ref={{stageRef}} style={{{{ position: "relative", flexShrink: 0, width: {W}, height: {max_sec_h}, '
                  'transformOrigin: "center center" }}>')
         for i, sec in enumerate(secs):
             y0, hb = bands[i]
@@ -893,8 +904,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
             y0, hb = bands[i]
             rev = "" if i == 0 else " reveal"
             L.append(f'        <div className="landing-sec{rev}" data-sec="{i}" style={{{{ position: "absolute", '
-                     f'left: 0, top: {y0}, width: {W}, height: {hb}, contentVisibility: "auto", '
-                     f'containIntrinsicSize: "{W}px {hb}px" }}}}>')
+                     f'left: 0, top: {y0}, width: {W}, height: {hb} }}}}>')
             L.append(f"          <{sec['comp']} {{...props}} />")
             L.append("        </div>")
         L.append("      </Stage>")

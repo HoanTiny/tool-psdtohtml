@@ -118,9 +118,10 @@ def render(out_dir, swiper=False):
         # nut bam: con tro + hieu ung hover nhe
         ".stage a.node { cursor: pointer; transition: filter .15s ease, transform .15s ease; }",
         ".stage a.node:hover { filter: brightness(1.08); }",
-        # moi SECTION la 1 lop rieng: content-visibility bo qua render section ngoai
-        # man hinh -> cuon muot hon, do hoa nang khong ve het cung luc.
-        f".stage .sec {{ position: absolute; left: 0; width: {cw}px; content-visibility: auto; }}",
+        # moi SECTION la 1 lop rieng (position:absolute). KHONG dung content-visibility
+        # vi ket hop voi .stage transform:scale() -> trinh duyet tinh nham section
+        # 'ngoai man hinh' -> khong paint -> section bi DEN. Lazy-load anh la du de muot.
+        f".stage .sec {{ position: absolute; left: 0; width: {cw}px; }}",
     ]
 
     def _item_html_css(l, top, lazy=True):
@@ -156,8 +157,7 @@ def render(out_dir, swiper=False):
         blocks = []
         for i, s in enumerate(sections):
             y0, hb = s["y0"], s["y1"] - s["y0"]
-            items_css.append(f".stage .sec{i}{{top:{y0}px;height:{hb}px;"
-                             f"contain-intrinsic-size:{cw}px {hb}px;}}")
+            items_css.append(f".stage .sec{i}{{top:{y0}px;height:{hb}px;}}")
             inner = []
             for l in groups[i]:
                 h, rule = _item_html_css(l, l["bbox"]["y"] - y0, lazy=(i > 0))  # section 0 tai ngay
@@ -205,7 +205,9 @@ def render(out_dir, swiper=False):
             "html,body{height:100%;overflow:hidden;}",
             ".deck{position:fixed;inset:0;overflow:hidden;background:#000;"
             "display:flex;align-items:center;justify-content:center;}",
-            f".deck .stage{{margin:0;transform-origin:center center;height:{max_sec_h}px;}}",
+            # flex:none + width co dinh: khong cho flex co stage tu 1920 -> viewport
+            # (neu co, se bi co 2 lan: 1 lan flex + 1 lan transform scale -> o nho ti hon giua).
+            f".deck .stage{{margin:0;flex:none;width:{cw}px;transform-origin:center center;height:{max_sec_h}px;}}",
             ".deck .stage section.sec{top:0 !important;opacity:0;transition:opacity .5s ease;"
             "pointer-events:none;}",
             ".deck .stage section.sec.on{opacity:1;pointer-events:auto;z-index:2;}",
@@ -294,7 +296,11 @@ def render(out_dir, swiper=False):
     navs.forEach(function(n,k){ n.classList.toggle('active', k===Math.min(idx, navs.length-1)); });
   }
   function fit(){ s = Math.min(1, deck.clientWidth/W); stage.style.transform='scale('+s+')'; __FIXEDSCALE__ }
+  // Ep repaint: dat transform 'none' roi reflow roi scale lai -> tranh loi layer
+  // scale khong duoc ve (section bi DEN cho toi khi resize), nhat la che do swiper.
+  function kick(){ stage.style.transform='none'; void stage.offsetHeight; fit(); }
   window.addEventListener('resize', fit); fit(); go(0);
+  window.addEventListener('load', kick); requestAnimationFrame(kick); setTimeout(kick, 300);
   function step(d){ if(lock) return; lock=true; setTimeout(function(){lock=false;}, 650); go(idx+d); }
   deck.addEventListener('wheel', function(e){ e.preventDefault(); if(Math.abs(e.deltaY)<8) return; step(e.deltaY>0?1:-1); }, {passive:false});
   window.addEventListener('keydown', function(e){
@@ -320,7 +326,10 @@ __COMMON__
   var wrap=document.querySelector('.stage-wrap'), stage=document.querySelector('.stage');
   var W=__CW__, H=__H__;
   function fit(){ var s=Math.min(1, wrap.clientWidth/W); stage.style.transform='scale('+s+')'; wrap.style.height=(H*s)+'px'; __FIXEDSCALE__ }
+  // Ep repaint sau khi tai xong -> tranh loi layer scale khong duoc ve (bi DEN).
+  function kick(){ stage.style.transform='none'; void stage.offsetHeight; fit(); }
   window.addEventListener('resize', fit); fit();
+  window.addEventListener('load', kick); requestAnimationFrame(kick); setTimeout(kick, 300);
   var secs=[].slice.call(document.querySelectorAll('.stage section.sec'));
   var navs=[].slice.call(document.querySelectorAll('.fixed-stage .navitem'));
   var N=secs.length;
