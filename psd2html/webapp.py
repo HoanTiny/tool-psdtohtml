@@ -86,12 +86,180 @@ def _parse_input(psd_list, out_dir, quality="balanced"):
 # BUOC 1: PARSE (cham) -> tao layout.json + assets, roi build MANIFEST cho editor
 # ----------------------------------------------------------------------------
 
+# ---------------- GOP LAYER (group) ----------------
+# Nguoi dung chon nhieu layer -> ghep thanh 1 anh (nhu group trong PSD) de web gon.
+# Luu 'groups.json' (danh sach group) canh layout; layout HIEU LUC = pristine + groups.
+
+def _pristine_layout(vdir):
+    """Tra ve layout GOC (chua group/loc). Tao layout.orig.json tu layout.json lan dau."""
+    vdir = Path(vdir)
+    orig = vdir / "layout.orig.json"
+    if not orig.exists():
+        shutil.copyfile(vdir / "layout.json", orig)
+    return json.loads(orig.read_text(encoding="utf-8"))
+
+
+def _groups_path(vdir):
+    return Path(vdir) / "groups.json"
+
+
+def _load_groups(vdir):
+    p = _groups_path(vdir)
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+
+
+def _save_groups(vdir, groups):
+    _groups_path(vdir).write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _norm_group_name(name):
+    """Chuan hoa ten de gom nhom goi y: bo ' copy', ' copy 2', duoi so/khoang trang."""
+    import re
+    s = (name or "").lower()
+    s = re.sub(r"\s+copy(\s+\d+)?$", "", s)
+    s = re.sub(r"[\s_\-]*\d+$", "", s)
+    return s.strip()
+
+
+def _blend_over(base, top, mode):
+    """Ghep 'top' len 'base' (deu HxWx4 float 0..1, straight alpha) theo blend mode.
+    Xap xi cac mode pho bien; mode la khong ho tro -> normal (source-over)."""
+    import numpy as np
+    Cb, ab = base[..., :3], base[..., 3:4]
+    Cs, as_ = top[..., :3], top[..., 3:4]
+    if mode == "multiply":
+        Bl = Cb * Cs
+    elif mode == "screen":
+        Bl = 1 - (1 - Cb) * (1 - Cs)
+    elif mode == "overlay":
+        Bl = np.where(Cb <= 0.5, 2 * Cb * Cs, 1 - 2 * (1 - Cb) * (1 - Cs))
+    elif mode in ("hard-light",):
+        Bl = np.where(Cs <= 0.5, 2 * Cb * Cs, 1 - 2 * (1 - Cb) * (1 - Cs))
+    elif mode == "darken":
+        Bl = np.minimum(Cb, Cs)
+    elif mode == "lighten":
+        Bl = np.maximum(Cb, Cs)
+    elif mode in ("soft-light",):
+        Bl = (1 - 2 * Cs) * Cb * Cb + 2 * Cs * Cb        # xap xi Pegtop
+    elif mode in ("color-dodge", "plus-lighter"):
+        Bl = np.minimum(1.0, Cb / np.clip(1 - Cs, 1e-4, 1))
+    else:
+        Bl = Cs                                          # normal + mode chua ho tro
+    Cs_eff = (1 - ab) * Cs + ab * Bl
+    ao = as_ + ab * (1 - as_)
+    Co = (Cs_eff * as_ + Cb * ab * (1 - as_)) / np.clip(ao, 1e-6, None)
+    return np.concatenate([Co, ao], axis=-1)
+
+
+def _composite_members(vdir, members):
+    """Ghep danh sach layer (theo thu tu ve, duoi->tren) thanh 1 anh RGBA + union bbox.
+    members: list dict layer co 'bbox','asset','opacity','blend'."""
+    import numpy as np
+    from PIL import Image
+    vdir = Path(vdir)
+    xs = [m["bbox"]["x"] for m in members]
+    ys = [m["bbox"]["y"] for m in members]
+    ex = max(m["bbox"]["x"] + m["bbox"]["width"] for m in members)
+    ey = max(m["bbox"]["y"] + m["bbox"]["height"] for m in members)
+    ux, uy = min(xs), min(ys)
+    W, H = ex - ux, ey - uy
+    base = np.zeros((H, W, 4), dtype=float)
+    for m in members:
+        p = vdir / m["asset"]
+        if not p.exists():
+            continue
+        im = Image.open(p).convert("RGBA")
+        arr = np.asarray(im).astype(float) / 255.0
+        op = m.get("opacity", 1)
+        if op is None:
+            op = 1
+        arr[..., 3] *= op
+        bx, by = m["bbox"]["x"] - ux, m["bbox"]["y"] - uy
+        ih, iw = arr.shape[:2]
+        ih, iw = min(ih, H - by), min(iw, W - bx)
+        if ih <= 0 or iw <= 0:
+            continue
+        top = np.zeros((H, W, 4), dtype=float)
+        top[by:by + ih, bx:bx + iw] = arr[:ih, :iw]
+        base = _blend_over(base, top, m.get("blend"))
+    out = (np.clip(base, 0, 1) * 255).astype("uint8")
+    return Image.fromarray(out, "RGBA"), {"x": ux, "y": uy, "width": W, "height": H}
+
+
+def _effective_layout(vdir):
+    """Layout HIEU LUC = pristine + ap dung cac group (ghep asset). Dam bao asset gop
+    ton tai tren dia (assets/<gid>.webp). Tra ve dict layout."""
+    vdir = Path(vdir)
+    layout = _pristine_layout(vdir)
+    groups = _load_groups(vdir)
+    if not groups:
+        return layout
+    by_id = {l["id"]: l for l in layout["layers"]}
+    assets_dir = vdir / "assets"
+    for g in groups:
+        members = [by_id[i] for i in g["members"] if i in by_id]
+        members = [m for m in members if m.get("asset")]
+        if len(members) < 2:
+            continue
+        gid = g["id"]
+        asset_rel = f"assets/{gid}.webp"
+        asset_path = vdir / asset_rel
+        if not asset_path.exists():
+            try:
+                img, ubbox = _composite_members(vdir, members)
+                img.save(asset_path, "WEBP", quality=92, method=4)
+            except Exception:
+                continue
+        else:
+            xs = [m["bbox"]["x"] for m in members]; ys = [m["bbox"]["y"] for m in members]
+            ubbox = {"x": min(xs), "y": min(ys),
+                     "width": max(m["bbox"]["x"] + m["bbox"]["width"] for m in members) - min(xs),
+                     "height": max(m["bbox"]["y"] + m["bbox"]["height"] for m in members) - min(ys)}
+        mset = set(g["members"])
+        idxs = [i for i, l in enumerate(layout["layers"]) if l["id"] in mset]
+        pos = min(idxs) if idxs else len(layout["layers"])
+        node = {"id": gid, "name": g.get("name") or gid, "kind": "pixel",
+                "bbox": ubbox, "opacity": 1.0, "parent": None, "asset": asset_rel,
+                "grouped": [m["id"] for m in members]}
+        layout["layers"] = ([l for l in layout["layers"][:pos] if l["id"] not in mset]
+                            + [node]
+                            + [l for l in layout["layers"][pos:] if l["id"] not in mset])
+    return layout
+
+
+def _suggest_groups(layout):
+    """Goi y nhom: layer co asset, CUNG SECTION + cung ten chuan hoa, >=2 -> 1 goi y.
+    Rang buoc cung section de tranh gom nham layer ten chung ('Layer') o cac section khac."""
+    from collections import defaultdict
+    secs = layout.get("sections") or [{"y0": 0, "y1": layout["canvas"]["height"]}]
+
+    def sec_of(cy):
+        for i, s in enumerate(secs):
+            if s["y0"] <= cy < s["y1"]:
+                return i
+        return len(secs) - 1
+
+    buckets = defaultdict(list)
+    for l in layout["layers"]:
+        if not l.get("asset") or l.get("grouped"):
+            continue
+        key = _norm_group_name(l.get("name"))
+        if not key:
+            continue
+        b = l["bbox"]
+        buckets[(sec_of(b["y"] + b["height"] / 2), key)].append(l["id"])
+    out = [{"name": k[1], "section": k[0], "members": v}
+           for k, v in buckets.items() if len(v) >= 2]
+    out.sort(key=lambda g: (g["section"], -len(g["members"])))
+    return out
+
+
 def _variant_manifest(job_id, vdir, url_prefix):
     """
-    Doc layout.json cua 1 bien the (desktop hoac mobile) -> manifest cho frontend:
-    canvas, danh sach section, va tung ANH (layer co asset) kem section index.
+    Doc layout HIEU LUC (pristine + group) cua 1 bien the -> manifest cho frontend:
+    canvas, section, tung ANH (layer co asset) kem section index, group hien co, goi y.
     """
-    layout = json.loads((Path(vdir) / "layout.json").read_text(encoding="utf-8"))
+    layout = _effective_layout(vdir)
     canvas = layout["canvas"]
     # Route /result/<job>/<path> da tro thang vao thu muc out -> URL KHONG kem 'out/'.
     base = f"/result/{job_id}/{url_prefix}"
@@ -119,6 +287,8 @@ def _variant_manifest(job_id, vdir, url_prefix):
             "asset": base + l["asset"],
             "text": bool((l.get("text") or {}).get("content")),
             "section": _section_of(b["y"] + b["height"] / 2),
+            "group": bool(l.get("grouped")),          # la layer GOP (nhieu layer)
+            "count": len(l.get("grouped") or []),     # so layer thanh vien
         })
 
     return {
@@ -126,6 +296,8 @@ def _variant_manifest(job_id, vdir, url_prefix):
         "screenshot": base + layout.get("screenshot", "screenshot.png"),
         "sections": [{"name": s["name"], "y0": s["y0"], "y1": s["y1"]} for s in secs],
         "layers": items,
+        "groups": _load_groups(vdir),
+        "suggestions": _suggest_groups(layout),
     }
 
 
@@ -168,19 +340,15 @@ def _run_parse(job_id, desktop_psds, mobile_psds, quality="balanced"):
 
 def _apply_selection(vdir, disabled):
     """
-    Loc layout.json: bo cac layer id nam trong `disabled`. Luon dung tu ban goc
-    layout.orig.json de export lai nhieu lan deu chinh xac theo lua chon hien tai.
+    Ghi layout.json = layout HIEU LUC (pristine + group) roi BO cac layer id trong
+    `disabled`. Luon dung tu pristine + groups nen export lai nhieu lan deu dung.
     """
     vdir = Path(vdir)
-    orig = vdir / "layout.orig.json"
-    cur = vdir / "layout.json"
-    if not orig.exists():
-        shutil.copyfile(cur, orig)
-    layout = json.loads(orig.read_text(encoding="utf-8"))
+    layout = _effective_layout(vdir)
     dis = set(disabled or [])
     if dis:
         layout["layers"] = [l for l in layout["layers"] if l.get("id") not in dis]
-    cur.write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
+    (vdir / "layout.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _run_export(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m):
@@ -361,6 +529,66 @@ def export():
     return jsonify({"job_id": job_id})
 
 
+def _variant_dir(job_id, variant):
+    out = JOBS_DIR / job_id / "out"
+    return out / "_mobile" if variant == "mobile" else out
+
+
+@app.route("/group", methods=["POST"])
+def group():
+    """Gop nhieu layer thanh 1 anh (nhu group PSD). Tra manifest moi de editor ve lai."""
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    variant = data.get("variant", "desktop")
+    members = [m for m in (data.get("members") or []) if m]
+    name = (data.get("name") or "Group").strip()[:40]
+    job = jobs.get(job_id)
+    vdir = _variant_dir(job_id, variant)
+    if not job or not (vdir / "layout.json").exists():
+        return jsonify({"error": "Chua co du lieu parse."}), 400
+    if len(members) < 2:
+        return jsonify({"error": "Chon it nhat 2 anh de gop."}), 400
+    # id group on dinh theo tap thanh vien
+    import hashlib
+    gid = "G" + hashlib.md5(",".join(sorted(members)).encode()).hexdigest()[:8]
+    groups = _load_groups(vdir)
+    # bo cac group cu co thanh vien trung (tranh 1 layer thuoc 2 group)
+    mset = set(members)
+    groups = [g for g in groups if not (set(g["members"]) & mset)]
+    groups.append({"id": gid, "name": name, "members": members})
+    _save_groups(vdir, groups)
+    try:
+        man = _build_manifest(job_id)
+        job["manifest"] = man
+        return jsonify({"manifest": man, "group_id": gid})
+    except Exception as e:
+        import traceback
+        return jsonify({"error": f"{e}", "trace": traceback.format_exc()[-800:]}), 500
+
+
+@app.route("/ungroup", methods=["POST"])
+def ungroup():
+    """Tach 1 group -> tra lai cac layer thanh vien."""
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    variant = data.get("variant", "desktop")
+    gid = data.get("group_id")
+    job = jobs.get(job_id)
+    vdir = _variant_dir(job_id, variant)
+    if not job or not (vdir / "layout.json").exists():
+        return jsonify({"error": "Chua co du lieu parse."}), 400
+    groups = [g for g in _load_groups(vdir) if g["id"] != gid]
+    _save_groups(vdir, groups)
+    asset = vdir / "assets" / f"{gid}.webp"    # don asset gop cu
+    try:
+        asset.unlink()
+    except OSError:
+        pass
+    man = _build_manifest(job_id)
+    job["manifest"] = man
+    return jsonify({"manifest": man})
+
+
 @app.route("/preview", methods=["POST"])
 def preview():
     """Xem thu: render slices theo lua chon anh hien tai (khong ZIP)."""
@@ -468,6 +696,14 @@ INDEX_HTML = """<!doctype html>
   .item .nm{font-size:12px;line-height:1.25;word-break:break-word;flex:1;min-width:0}
   .item .badge{font-size:9px;padding:1px 5px;border-radius:4px;background:#334155;color:#cbd5e1;margin-left:4px}
   .item input{flex:0 0 auto}
+  .item.gsel{outline:2px solid #2563eb;background:#12233f}
+  .item.grp{background:#0e1f16;border-color:#1f7a4d}
+  .item .gbadge{font-size:9px;padding:1px 5px;border-radius:4px;background:#1f7a4d;color:#d1fae5;margin-left:4px}
+  .item .untie{margin-left:auto;font-size:11px;color:#fca5a5;background:#2a1418;border:1px solid #7f1d1d;border-radius:6px;padding:2px 7px;cursor:pointer;flex:0 0 auto}
+  .gmode .item{cursor:copy}
+  #grpMode.active{background:#1f7a4d;color:#eafff3;border-color:#1f7a4d}
+  .sug-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:#0f223b;border:1px solid #2f4a75;color:#bcd3f5;border-radius:20px;padding:5px 12px;margin:0 6px 6px 0;cursor:pointer}
+  .sug-chip:hover{background:#16325a}
   .hint{color:var(--muted);font-size:13px;margin:0 0 12px}
 </style></head><body>
 <div class="wrap">
@@ -518,10 +754,18 @@ INDEX_HTML = """<!doctype html>
     <div class="row" style="margin-top:0">
       <b style="font-size:16px">&#9986;&#65039; Chon anh dua vao web</b>
       <span class="tabs" id="tabs"></span>
-      <span style="margin-left:auto;color:var(--muted);font-size:13px" id="selInfo"></span>
+      <button class="ghost" id="grpMode" style="margin-left:auto">&#129513; Che do gop</button>
+      <span style="color:var(--muted);font-size:13px" id="selInfo"></span>
     </div>
-    <p class="hint">Bo tich = khong xuat anh do. Bam tieu de section de bat/tat ca section.
+    <p class="hint" id="edHint">Bo tich = khong xuat anh do. Bam tieu de section de bat/tat ca section.
       Preview ben trai an/hien ngay theo lua chon.</p>
+    <div id="grpBar" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;background:#0b1b2e;border:1px solid #2563eb;border-radius:10px;padding:10px 12px;margin-bottom:12px">
+      <b style="color:#93c5fd" id="grpCount">0 anh chon</b>
+      <input id="grpName" placeholder="Ten group (vd Background)" style="flex:1;min-width:160px;padding:7px 10px;background:#0f172a;border:1px solid var(--line);border-radius:7px;color:#e8eeff">
+      <button id="grpDo">&#129513; Gop thanh 1 anh</button>
+      <button class="ghost" id="grpClear">Bo chon</button>
+    </div>
+    <div id="grpSug" style="margin-bottom:12px"></div>
     <div class="ed">
       <div class="prevBox"><div class="stage" id="stage"></div></div>
       <div id="secList"></div>
@@ -588,6 +832,8 @@ INDEX_HTML = """<!doctype html>
 let filesD=[], filesM=[];
 let JOB=null, MAN=null, curTab='desktop';
 const disabled={desktop:new Set(), mobile:new Set()};
+let groupMode=false;
+const groupSel={desktop:new Set(), mobile:new Set()};
 
 function showList(nameEl, arr){
   if(!arr.length){ nameEl.innerHTML=""; return; }
@@ -657,13 +903,15 @@ async function pollParse(){
 function openEditor(){
   document.getElementById("step1").style.display="none";
   disabled.desktop.clear(); disabled.mobile.clear();
+  groupSel.desktop.clear(); groupSel.mobile.clear();
+  groupMode=false; document.getElementById("grpMode").classList.remove("active");
   curTab='desktop';
   const tabs=document.getElementById("tabs");
   tabs.innerHTML="";
   if(MAN.mobile){
     ["desktop","mobile"].forEach(t=>{ const b=document.createElement("button");
       b.textContent=t==='desktop'?'\\u{1F4BB} Desktop':'\\u{1F4F1} Mobile';
-      b.className=t===curTab?'active':''; b.onclick=()=>{curTab=t; render();}; tabs.appendChild(b); });
+      b.className=t===curTab?'active':''; b.onclick=()=>{curTab=t; groupSel[t].clear(); render();}; tabs.appendChild(b); });
   }
   editor.classList.add("show"); render();
 }
@@ -687,7 +935,9 @@ function render(){
   stage.innerHTML=html;
 
   // list nhom theo section
+  const gsel=groupSel[curTab];
   const list=document.getElementById("secList"); list.innerHTML="";
+  list.classList.toggle("gmode", groupMode);
   v.sections.forEach((s,si)=>{
     const layers=v.layers.filter(l=>l.section===si);
     if(!layers.length) return;
@@ -704,20 +954,49 @@ function render(){
     const box=document.createElement("div"); box.className="layers";
     layers.forEach(l=>{
       const on=!dis.has(l.id);
-      const it=document.createElement("label"); it.className="item"+(on?"":" off");
-      it.innerHTML='<input type="checkbox" '+(on?"checked":"")+'>'
+      const it=document.createElement("div");
+      it.className="item"+(on?"":" off")+(l.group?" grp":"")+(gsel.has(l.id)?" gsel":"");
+      it.innerHTML='<input type="checkbox" '+(on?"checked":"")+(groupMode?' disabled':'')+'>'
         +'<img class="th" src="'+l.asset+'" loading="lazy">'
-        +'<span class="nm">'+esc(l.name)+(l.text?'<span class="badge">T</span>':'')+'</span>';
-      it.querySelector('input').onchange=(e)=>{ if(e.target.checked) dis.delete(l.id); else dis.add(l.id);
-        // cap nhat nhanh khong render lai toan bo
+        +'<span class="nm">'+esc(l.name)
+          +(l.text?'<span class="badge">T</span>':'')
+          +(l.group?'<span class="gbadge">gop '+l.count+'</span>':'')+'</span>'
+        +(l.group?'<span class="untie" title="Tach group">&#9986; tach</span>':'');
+      const cb=it.querySelector('input');
+      cb.onclick=(e)=>{ e.stopPropagation();
+        if(e.target.checked) dis.delete(l.id); else dis.add(l.id);
         it.classList.toggle("off",!e.target.checked);
         const im=stage.querySelector('img[data-id="'+cssq(l.id)+'"]'); if(im) im.classList.toggle("off",!e.target.checked);
         updInfo(); h.querySelector('.cnt').textContent=layers.filter(x=>!dis.has(x.id)).length+'/'+layers.length+' anh'; };
+      const untie=it.querySelector('.untie');
+      if(untie) untie.onclick=(e)=>{ e.stopPropagation(); doUngroup(l.id); };
+      it.onclick=()=>{ if(!groupMode) return;
+        if(gsel.has(l.id)) gsel.delete(l.id); else gsel.add(l.id);
+        it.classList.toggle("gsel", gsel.has(l.id)); updGrpBar(); };
       box.appendChild(it);
     });
     sec.appendChild(box); list.appendChild(sec);
   });
-  updInfo();
+  renderSug(); updGrpBar(); updInfo();
+}
+// goi y nhom gop (cung ten chuan hoa) + group hien co
+function renderSug(){
+  const box=document.getElementById("grpSug"); const v=variant();
+  if(!groupMode){ box.innerHTML=""; return; }
+  let h='';
+  const sug=(v.suggestions||[]).filter(s=>s.members.length>=2);
+  if(sug.length){ h+='<div style="color:var(--muted);font-size:12px;margin-bottom:6px">Goi y gop (cung section + ten) - bam de gop:</div>';
+    sug.forEach((s,i)=>{ const sn=(v.sections[s.section]||{}).name||('S'+(s.section+1));
+      h+='<span class="sug-chip" data-si="'+i+'">&#129513; '+esc(s.name||'nhom')+' &middot; '+s.members.length+' anh <span style="opacity:.6">('+esc(sn)+')</span></span>'; }); }
+  else h='<div style="color:var(--muted);font-size:12px">Khong co goi y (khong co anh cung ten). Chon tay tren danh sach.</div>';
+  box.innerHTML=h;
+  box.querySelectorAll('.sug-chip').forEach(c=>{ c.onclick=()=>{
+    const s=sug[+c.dataset.si]; doGroup(s.members, s.name); }; });
+}
+function updGrpBar(){
+  const bar=document.getElementById("grpBar"); const gsel=groupSel[curTab];
+  bar.style.display=groupMode?"flex":"none";
+  document.getElementById("grpCount").textContent=gsel.size+" anh chon";
 }
 function updInfo(){
   const v=variant(), dis=disabled[curTab], tot=v.layers.length, kept=tot-[...dis].filter(id=>v.layers.some(l=>l.id===id)).length;
@@ -725,6 +1004,42 @@ function updInfo(){
 }
 function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function cssq(s){ return (s||"").replace(/"/g,'\\\\"'); }
+
+// ---- GOP LAYER ----
+document.getElementById("grpMode").onclick=()=>{
+  groupMode=!groupMode;
+  document.getElementById("grpMode").classList.toggle("active", groupMode);
+  document.getElementById("edHint").textContent=groupMode
+    ? "Che do GOP: bam vao anh de chon, roi 'Gop thanh 1 anh'. Bam 'tach' de bo group."
+    : "Bo tich = khong xuat anh do. Bam tieu de section de bat/tat ca section.";
+  if(!groupMode) groupSel[curTab].clear();
+  render();
+};
+document.getElementById("grpClear").onclick=()=>{ groupSel[curTab].clear(); render(); };
+document.getElementById("grpDo").onclick=()=>{
+  const ids=[...groupSel[curTab]];
+  const nm=document.getElementById("grpName").value.trim();
+  doGroup(ids, nm);
+};
+async function doGroup(members, name){
+  if((members||[]).length<2){ alert("Chon it nhat 2 anh de gop."); return; }
+  const btn=document.getElementById("grpDo"); if(btn) btn.disabled=true;
+  try{
+    const r=await fetch("/group",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({job_id:JOB, variant:curTab, members, name:name||"Group"})}).then(x=>x.json());
+    if(r.error){ alert("Loi gop: "+r.error); return; }
+    MAN=r.manifest; groupSel[curTab].clear();
+    document.getElementById("grpName").value="";
+    render();
+  }catch(e){ alert("Loi gop: "+e); }
+  finally{ if(btn) btn.disabled=false; }
+}
+async function doUngroup(gid){
+  const r=await fetch("/ungroup",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({job_id:JOB, variant:curTab, group_id:gid})}).then(x=>x.json());
+  if(r.error){ alert("Loi tach: "+r.error); return; }
+  MAN=r.manifest; render();
+}
 
 document.getElementById("restart").onclick=()=>{
   editor.classList.remove("show"); exportPanel.classList.remove("show");
