@@ -228,6 +228,25 @@ def _mostly_white(img, thr=0.9):
         return False
 
 
+def _mostly_dark(img, thr=0.92):
+    """
+    Vung crop co gan nhu TOAN pixel den (trong so cac pixel DAC) khong (>thr).
+    Dung phat hien layer nen 'suy bien' (composite rieng ra den do la lop dieu
+    chinh/fill da bake vao composite tong) -> fallback lay mau tu composite tong.
+    """
+    try:
+        import numpy as np
+        a = np.asarray(img.convert("RGBA"))
+        alpha = a[..., 3]
+        opaque = alpha > 8
+        if opaque.mean() < 0.5:      # phan lon trong suot -> khong coi la nen den
+            return False
+        near_black = (a[..., :3].max(axis=2) < 16) & opaque
+        return near_black.sum() / max(1, opaque.sum()) >= thr
+    except Exception:
+        return False
+
+
 def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch=0, parent_id=None, overlay=None):
     """
     Duyet de quy cay layer, lam phang thanh danh sach `out`.
@@ -299,6 +318,21 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
                     export_img = crop
             except Exception:
                 export_img = img
+        # Layer NEN: mac dinh giu composite rieng. Nhung neu composite rieng SUY BIEN
+        # (den/trang/rong) -> day thuc chat la lop dieu chinh/fill da bake vao composite
+        # tong; neu de opaque no se CHE ca trang (bug hero den). Thay bang crop tu
+        # composite tong (mau that), bo blend/opacity vi da la anh da render.
+        elif (real_comp is not None and img is not None
+              and is_background(node, cw, ch) and not is_overlay
+              and (_is_blank(img) or _mostly_white(img) or _mostly_dark(img))):
+            try:
+                crop = real_comp.crop((b["x"], b["y"], b["x"] + b["width"], b["y"] + b["height"])).convert("RGBA")
+                if not (_is_blank(crop) or _mostly_white(crop)):
+                    export_img = crop
+                    node["opacity"] = 1.0
+                    node.pop("blend", None)
+            except Exception:
+                pass
 
         # CLIP layer ve trong khung canvas. Layer PSD thuong VE LAN ra ngoai
         # canvas (bleed) - composite/screenshot da tu cat, nhung asset PNG xuat
