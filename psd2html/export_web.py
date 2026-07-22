@@ -312,13 +312,57 @@ def _looks_title(alt):
     return bool(re.search(r"[a-zàáâãèéêìíòóôõùúăâêôơưỳý/ ]", alt)) and (" " in alt or len(alt) <= 16)
 
 
+# Tu khoa nhan dien section landing-game (dang khong dau, viet thuong) -> ten component.
+# Quet moi layer chu trong band; khop cum dai truoc (nhieu tu) de uu tien cai cu the hon.
+_SECTION_KEYWORDS = [
+    ("nap lien tiep", "NapLienTiep"),
+    ("nap tich luy", "TichLuyNap"),
+    ("nap dung goi", "NapDungGoi"),
+    ("nap moc", "MocNap"),
+    ("tich luy", "TichLuy"),
+    ("diem danh", "DiemDanh"),
+    ("dang nhap", "DangNhap"),
+    ("vong quay", "VongQuay"),
+    ("quay so", "QuaySo"),
+    ("mini game", "MiniGame"),
+    ("doi qua", "DoiQua"),
+    ("doi thuong", "DoiThuong"),
+    ("moc thuong", "MocThuong"),
+    ("phan thuong", "PhanThuong"),
+    ("qua tang", "QuaTang"),
+    ("nhan qua", "NhanQua"),
+    ("su kien", "SuKien"),
+    ("the le", "TheLe"),
+    ("huong dan", "HuongDan"),
+    ("gioi thieu", "GioiThieu"),
+    ("nap the", "NapThe"),
+    ("nap", "Nap"),
+    ("qua", "Qua"),
+]
+
+
+def _keyword_name(flat):
+    """Quet chu trong band tim tu khoa section quen thuoc; None neu khong khop."""
+    blob = " ".join(_ascii(it["alt"]).lower() for it in flat if it.get("t") and it.get("alt"))
+    for kw, name in _SECTION_KEYWORDS:
+        if kw in blob:
+            return name
+    return None
+
+
 def _section_name(flat, W, H, y0, y1, idx, used):
-    """Dat ten section theo tieu de noi bat (neu doan duoc), khong thi Section{n}."""
+    """Dat ten section: (1) tieu de chu noi bat, (2) tu khoa quen thuoc, (3) Section{n}."""
     band_h = max(1, y1 - y0)
-    # chi lay LAYER CHU (t=True) lam tieu de section; uu tien o tren cung
+    # (1) chi lay LAYER CHU (t=True) lam tieu de section; uu tien o tren cung
     cands = [it for it in flat if it.get("t") and it["y"] < y0 + band_h * 0.6 and _looks_title(it["alt"])]
     cands.sort(key=lambda it: (it["y"], -it["w"]))
-    name = _pascal(cands[0]["alt"])[:24] if cands else f"Section{idx + 1}"
+    name = _pascal(cands[0]["alt"])[:24] if cands else None
+    # (2) khong doan duoc tieu de -> quet tu khoa section trong ca band
+    if not name:
+        name = _keyword_name(flat)
+    # (3) van khong co -> Section{n}
+    if not name:
+        name = f"Section{idx + 1}"
     base = name
     k = 1
     while name in used:
@@ -358,7 +402,11 @@ def _split_sections(board, layout):
         if not sflat and not sreps:
             continue
         # Uu tien ten section chia san tu file PSD (merge.py); khong thi doan tieu de.
+        # BO QUA ten merge tam thuong (chi chu so, vd file '1.psd'/'2.psd' -> 'G1'/'G2')
+        # de con roi ve doan tieu de/tu khoa -> ten co nghia hon.
         explicit = band_names[i] if i < len(band_names) else None
+        if explicit and re.fullmatch(r"[\s0-9_.\-]+", explicit or ""):
+            explicit = None
         if explicit:
             base = _pascal(explicit)[:24] or f"Section{len(sections) + 1}"
             name, k = base, 1
@@ -415,7 +463,7 @@ def _gen_types():
         "  id: string; src: string; x: number; y: number; w: number; h: number;\n"
         "  o: number; blend?: string | null; alt?: string; cls?: string;\n"
         "  href?: string | null; act?: string | null; menu?: boolean; toggle?: boolean;\n"
-        "  asText?: boolean; text?: string; tsize?: number; tcolor?: string;\n}\n\n"
+        "  asText?: boolean; text?: string; tsize?: number; tcolor?: string; lcp?: boolean;\n}\n\n"
         "export interface FixedItem {\n"
         "  src: string; x: number; y: number; w: number; h: number;\n"
         "  o: number; blend?: string | null; alt?: string; href?: string | null; nav?: number | null;\n}\n\n"
@@ -811,7 +859,7 @@ _LANDING_EFFECT = r'''  useEffect(() => {
       e.preventDefault();
       const act = a.getAttribute("data-action") || "other";
       const url = LINKS[act];
-      if (url) { window.open(url, "_blank"); return; }
+      if (url) { window.open(url, "_blank", "noopener,noreferrer"); return; }
       openAction(act);
     };
     document.addEventListener("click", onClick);
@@ -827,9 +875,10 @@ _LANDING_EFFECT = r'''  useEffect(() => {
 
 _LANDING_MODAL = r'''      {modal && (
         <div onClick={(e) => { if (e.target === e.currentTarget) setModal(null); }}
+          role="dialog" aria-modal="true" aria-label={modal.title}
           className="fixed inset-0 z-[3000] flex items-center justify-center bg-[rgba(4,8,20,.72)]">
           <div className="relative w-[90%] max-w-[420px] rounded-2xl border border-[#33507e] bg-[#111a2e] px-[34px] py-[30px] text-center text-[#e8eeff]">
-            <button onClick={() => setModal(null)}
+            <button onClick={() => setModal(null)} aria-label="Đóng"
               className="absolute right-[14px] top-2 cursor-pointer border-0 bg-transparent text-2xl text-[#7d90b5]">&times;</button>
             <h3 className="mb-[10px] text-xl">{modal.title}</h3>
             <p className="mb-5 text-sm leading-normal text-[#9db0d6]">{modal.desc}</p>
@@ -851,7 +900,8 @@ _LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef
     const go = (i) => { idx = Math.max(0, Math.min(N - 1, i));
       secEls.forEach((el, k) => el.classList.toggle("on", k === idx));
       navs.forEach((n, k) => n.classList.toggle("active", k === Math.min(idx, navs.length - 1))); };
-    const fit = () => { s = Math.min(1, deck.clientWidth / __W__); stage.style.transform = `scale(${s})`; };
+    // CONTAIN: scale theo ca rong lan cao de section cao nhat cung vua viewport (khong cat).
+    const fit = () => { s = Math.min(1, deck.clientWidth / __W__, deck.clientHeight / (stage.offsetHeight || 1)); stage.style.transform = `scale(${s})`; };
     window.addEventListener("resize", fit); fit(); go(0);
     // Ep repaint: layer scale khong duoc ve (section DEN) cho toi khi co nhip repaint.
     const kick = () => { stage.style.transform = "none"; void stage.offsetHeight; fit(); };
@@ -873,7 +923,7 @@ _LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef
     const onClick = (e) => { const a = e.target.closest(".hot"); if (!a || !deck.contains(a)) return;
       const href = a.getAttribute("href"); if (href && href !== "#") return; e.preventDefault();
       const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
-      if (url) { window.open(url, "_blank"); return; }
+      if (url) { window.open(url, "_blank", "noopener,noreferrer"); return; }
       openAction(act); };
     document.addEventListener("click", onClick);
     return () => { window.removeEventListener("resize", fit); deck.removeEventListener("wheel", onWheel);
@@ -890,8 +940,14 @@ _LANDING_SWIPERLIB_EFFECT = r'''  useEffect(() => {
     // cung dung document.querySelectorAll(".slide-stage") roi giam scale len nhau.
     const root = rootRef.current; if (!root) return;
     const N = __N__;
-    const fit = () => { const s = Math.min(1, window.innerWidth / __W__);
-      root.querySelectorAll__QS__(".slide-stage").forEach((el) => { el.style.transform = `scale(${s})`; }); };
+    // CONTAIN: scale theo CA rong lan cao (min) de moi section VUA KHIT viewport
+    // (khong tran d/cat). Moi slide cao khac nhau -> scale rieng theo el.offsetHeight.
+    const fit = () => {
+      root.querySelectorAll__QS__(".slide-stage").forEach((el) => {
+        const h = el.offsetHeight || 1;
+        const s = Math.min(1, window.innerWidth / __W__, window.innerHeight / h);
+        el.style.transform = `scale(${s})`;
+      }); };
     fit(); window.addEventListener("resize", fit);
     // Ep repaint: tranh slide bi DEN (layer scale khong duoc ve cho toi khi repaint).
     const kick = () => { root.querySelectorAll__QS__(".slide-stage").forEach((el) => { el.style.transform = "none"; void el.offsetHeight; }); fit(); };
@@ -903,7 +959,7 @@ _LANDING_SWIPERLIB_EFFECT = r'''  useEffect(() => {
     const onClick = (e) => { const a = (e.target__ASH__).closest(".hot"); if (!a || !root.contains(a)) return;
       const href = a.getAttribute("href"); if (href && href !== "#") return; e.preventDefault();
       const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
-      if (url) { window.open(url, "_blank"); return; }
+      if (url) { window.open(url, "_blank", "noopener,noreferrer"); return; }
       openAction(act); };
     root.addEventListener("click", onClick);
     return () => { window.removeEventListener("resize", fit);
@@ -941,7 +997,7 @@ def _fluid_slots(rp, item_ref, lang):
     return out
 
 
-def _gen_fluid_mobile(board, lang, client):
+def _gen_fluid_mobile(board, lang, client, config_rel="../../landing.config"):
     """Layout MOBILE co gian THAT (opt-in --fluid): section xep doc (flow), moi
     section:
       - Khong co luoi deu -> canvas ti le khoa (aspect-ratio), art dinh vi % ->
@@ -960,7 +1016,7 @@ def _gen_fluid_mobile(board, lang, client):
         return y0 <= cy < y0 + hb
 
     refann = "<HTMLDivElement>" if lang == "ts" else ""
-    L = [head + 'import { useEffect, useRef } from "react";\nimport { LINKS } from "../../landing.config";\n',
+    L = [head + f'import {{ useEffect, useRef }} from "react";\nimport {{ LINKS }} from "{config_rel}";\n',
          "// Layout mobile co gian (fluid): sinh boi che do --fluid. Desktop dung ban rieng.",
          "export default function MobileFluid() {",
          f"  const onClaim = (id{_ann(lang, 'number')}) => {{ console.log('claim', id); }};",
@@ -970,7 +1026,7 @@ def _gen_fluid_mobile(board, lang, client):
          "    const onClick = (e) => { const a = (e.target" + (" as HTMLElement" if lang == "ts" else "")
          + ').closest(".hot"); if (!a || !root.contains(a)) return;',
          '      const act = a.getAttribute("data-action"); if (!act) return;',
-         "      const url = LINKS[act]; if (url) { e.preventDefault(); window.open(url, '_blank'); } };",
+         "      const url = LINKS[act]; if (url) { e.preventDefault(); window.open(url, '_blank', 'noopener,noreferrer'); } };",
          "    root.addEventListener('click', onClick);",
          "    return () => root.removeEventListener('click', onClick);",
          "  }, []);",
@@ -1078,7 +1134,8 @@ def _page_desc(board):
     return (" · ".join(_ctext_of(l) for l in txts[:6]) or _page_title(board))[:160]
 
 
-def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=None):
+def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=None,
+                 config_rel="../../landing.config", comp_base="."):
     head = '"use client";\n\n' if client else ""
     comp = board["landing_name"]
     has_fixed = bool(board.get("fixed"))
@@ -1097,7 +1154,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
     h1_jsx = f'      <h1 className="sr-only">{{{json.dumps(page_title, ensure_ascii=False)}}}</h1>'
 
     imports = ['import { useState, useEffect, useRef } from "react";',
-               'import { LINKS, LABELS } from "../../landing.config";']
+               f'import {{ LINKS, LABELS }} from "{config_rel}";']
     if swiper_lib:  # dung thu vien Swiper.js that (giong prod)
         imports.insert(1, 'import { Swiper, SwiperSlide } from "swiper/react";')
         imports.insert(2, 'import { Mousewheel, EffectFade } from "swiper/modules";')
@@ -1105,14 +1162,14 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         imports.insert(4, 'import "swiper/css/effect-fade";')
     elif not swiper:  # swiper (fade tu viet) tu ve nen trong section, khong dung Stage/Background
         imports.insert(1, f'import Stage from "{stage_rel}";')
-        imports.insert(2, 'import Background from "./Background";')
+        imports.insert(2, f'import Background from "{comp_base}/Background";')
     if nav_tag:
-        imports.append(f'import {nav_tag} from "./{nav_tag}";')
+        imports.append(f'import {nav_tag} from "{comp_base}/{nav_tag}";')
     popups = bool(feats.get("popups"))
     if popups:
-        imports.append('import Popups from "./Popups";')
+        imports.append(f'import Popups from "{comp_base}/Popups";')
     for sec in secs:
-        imports.append(f'import {sec["comp"]} from "./{sec["comp"]}";')
+        imports.append(f'import {sec["comp"]} from "{comp_base}/{sec["comp"]}";')
 
     modal_ty = "<{ title: string; desc: string } | null>" if lang == "ts" else ""
     pop_ty = "<string | null>" if lang == "ts" else ""
@@ -1128,21 +1185,42 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         L.append(f"  const [popup, setPopup] = useState{pop_ty}(null);")
         L.append("  const openAction = (act) => setPopup(act);  // mo popup theo loai nut")
     else:
-        L.append("  const openAction = (act) => setModal({ title: LABELS[act] || \"Thông báo\", "
-                 "desc: 'Chức năng \"' + (LABELS[act] || act) + '\": điền URL vào LINKS.' + act + ' hoặc gọi API tại đây.' });")
+        # UX: KHONG lo ten bien cau hinh (LINKS.<act>) ra UI cho nguoi dung cuoi.
+        # Chi hien thong bao chung; nhac dev qua console.warn (chi hien khi dev).
+        L.append("  const openAction = (act) => {")
+        L.append('    if (process.env.NODE_ENV !== "production") '
+                 "console.warn('[landing] Chua cau hinh link cho \"' + act + '\". "
+                 "Dien URL vao LINKS.' + act + ' trong landing.config, hoac goi API tai openAction().');")
+        L.append("    setModal({ title: LABELS[act] || \"Thông báo\", "
+                 "desc: \"Tính năng đang được cập nhật. Vui lòng quay lại sau.\" });")
+        L.append("  };")
+    # a11y: dong modal/popup bang phim Esc (hook dat truoc cac mode -> thu tu hook on dinh)
+    close_call = "setPopup(null)" if popups else "setModal(null)"
+    L.append("  useEffect(() => {")
+    L.append(f'    const onKey = (e{_ann(lang, "KeyboardEvent")}) => {{ if (e.key === "Escape") {close_call}; }};')
+    L.append('    window.addEventListener("keydown", onKey);')
+    L.append('    return () => window.removeEventListener("keydown", onKey);')
+    L.append("  }, []);")
     modal_block = ("      <Popups type={popup} onClose={() => setPopup(null)} />" if popups else _LANDING_MODAL)
 
     def _bg_imgs(y0, hb, indent):
-        """JSX cho cac layer nen thuoc section [y0, y0+hb) (toa do doi ve goc section)."""
+        """JSX cho cac layer nen GIAO voi section [y0, y0+hb) (toa do doi ve goc section).
+        LOC THEO GIAO (khong theo tam): nen phu toan trang (vd canh le hoi cao = ca trang)
+        phai hien o MOI section no phu, khong chi 1 section chua tam no -> tranh cac
+        slide con lai bi nen DEN. Moi slide/section co overflow-hidden nen phan bg trom
+        ra ngoai band se bi cat, con lai dung lat cat nen cho band do."""
         out = []
         for bg in board.get("backgrounds", []):
-            cy = bg["y"] + bg["h"] / 2
-            if not (y0 <= cy < y0 + hb):
-                continue
+            top, bot = bg["y"], bg["y"] + bg["h"]
+            if bot <= y0 or top >= y0 + hb:
+                continue   # bg khong giao band nay
             cls = _tw_cls({"x": bg["x"], "y": bg["y"] - y0, "w": bg["w"], "h": bg["h"],
                            "o": bg.get("o", 1), "blend": bg.get("blend")})
+            # LCP: nen section dau (bg.lcp) tai NGAY (eager + fetchPriority high),
+            # con lai lazy - dong bo voi cach danh dau o component Background.
+            _ld = 'loading="eager" fetchPriority="high"' if bg.get("lcp") else 'loading="lazy"'
             out.append(f'{indent}<img key={json.dumps(bg["id"])} src={json.dumps(bg["src"])} '
-                       f'alt={json.dumps(bg.get("alt", ""))} loading="lazy" decoding="async" className="{cls}" />')
+                       f'alt={json.dumps(bg.get("alt", ""))} {_ld} decoding="async" className="{cls}" />')
         return out
 
     if swiper_lib:
@@ -1292,12 +1370,17 @@ TSCONFIG_VITE = json.dumps({
     "compilerOptions": {"target": "ES2020", "useDefineForClassFields": True,
         "lib": ["ES2020", "DOM", "DOM.Iterable"], "module": "ESNext", "skipLibCheck": True,
         "moduleResolution": "bundler", "allowImportingTsExtensions": True, "resolveJsonModule": True,
-        "isolatedModules": True, "noEmit": True, "jsx": "react-jsx", "strict": False,
-        "noUnusedLocals": False, "noUnusedParameters": False},
+        "isolatedModules": True, "noEmit": True, "jsx": "react-jsx", "strict": True,
+        # noImplicitAny tat: nhieu DOM handler trong template codegen dung chung cho ca
+        # JS lan TS -> khong the annotate rieng cho TS ma khong pha JS. strictNullChecks
+        # (phan gia tri nhat cua strict) VAN bat. Annotate day du la buoc nang cap sau.
+        "noImplicitAny": False, "noUnusedLocals": False, "noUnusedParameters": False},
     "include": ["src"]}, indent=2)
 TSCONFIG_NEXT = json.dumps({
     "compilerOptions": {"target": "ES2017", "lib": ["dom", "dom.iterable", "esnext"], "allowJs": True,
-        "skipLibCheck": True, "strict": False, "noEmit": True, "esModuleInterop": True, "module": "esnext",
+        "skipLibCheck": True, "strict": True, "noImplicitAny": False,
+        "noUnusedLocals": False, "noUnusedParameters": False,
+        "noEmit": True, "esModuleInterop": True, "module": "esnext",
         "moduleResolution": "bundler", "resolveJsonModule": True, "isolatedModules": True, "jsx": "preserve",
         "incremental": True, "plugins": [{"name": "next"}], "paths": {"@/*": ["./*"]}},
     "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"], "exclude": ["node_modules"]}, indent=2)
@@ -1312,13 +1395,25 @@ def _copy_assets(src_out, project_dir, dest):
     shutil.copytree(src, dst)
 
 
-def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, feats=None):
-    """Ghi 1 bo component landing (desktop hoac mobile) vao base_dir."""
+def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, feats=None,
+                       pages_dir=None, config_rel="../../landing.config", comp_base="."):
+    """Ghi building-block components (Layer/Background/section/repeat/nav/popup) vao
+    base_dir; page composition (Landing + MobileFluid) vao pages_dir. Neu pages_dir=None
+    -> page nam CHUNG base_dir (dung cho Next app-router: route o app/, phan con lai o
+    components/). config_rel/comp_base = duong dan import (tu PAGE) toi config va cac
+    building-block."""
     base_dir.mkdir(parents=True, exist_ok=True)
     ext = _ext(lang)
     (base_dir / f"Layer.{ext}").write_text(_gen_layer(lang, client), encoding="utf-8")
-    (base_dir / f"Background.{ext}").write_text(_gen_background(board, lang, client), encoding="utf-8")
     feats = feats or {}
+    # Background.{ext} CHI duoc import/render o mode mac dinh (cuon doc), khong dung o
+    # mode swiper/swiper_lib (nen ve inline trong section). Khop dung dieu kien voi
+    # _gen_landing de KHONG ghi file chet.
+    _secs = board.get("sections") or []
+    _swiper_lib = bool(feats.get("swiper_lib")) and bool(_secs)
+    _eff_swiper = (bool(swiper) and bool(_secs)) or _swiper_lib
+    if not _eff_swiper:
+        (base_dir / f"Background.{ext}").write_text(_gen_background(board, lang, client), encoding="utf-8")
     if board.get("fixed"):
         if feats.get("nav_menu"):
             (base_dir / f"NavMenu.{ext}").write_text(_gen_navmenu(board, lang, client), encoding="utf-8")
@@ -1330,22 +1425,118 @@ def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, f
         (base_dir / f"{sec['comp']}.{ext}").write_text(_gen_section(sec, lang, client), encoding="utf-8")
         for rp in sec["repeats"]:
             (base_dir / f"{rp['comp']}.{ext}").write_text(_gen_repeat(rp, lang, client), encoding="utf-8")
-    (base_dir / f"{board['landing_name']}.{ext}").write_text(
-        _gen_landing(board, lang, client, stage_rel, swiper=swiper, feats=feats), encoding="utf-8")
+    # page composition -> pages_dir (React) hoac chung base_dir (Next)
+    pdir = pages_dir if pages_dir is not None else base_dir
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / f"{board['landing_name']}.{ext}").write_text(
+        _gen_landing(board, lang, client, stage_rel, swiper=swiper, feats=feats,
+                     config_rel=config_rel, comp_base=comp_base), encoding="utf-8")
     if feats.get("fluid"):
-        (base_dir / f"MobileFluid.{ext}").write_text(
-            _gen_fluid_mobile(board, lang, client), encoding="utf-8")
+        (pdir / f"MobileFluid.{ext}").write_text(
+            _gen_fluid_mobile(board, lang, client, config_rel=config_rel), encoding="utf-8")
 
 
-def _api_hook(lang):
-    ret = _ann(lang, "unknown")
-    return ('import { useEffect, useState } from "react";\n\n'
-            "// Hook lay data landing tu API cua BE. Dien endpoint that.\n"
+def _eslintrc_react(lang):
+    """Cau hinh ESLint toi thieu (React hooks). Rule de muc 'warn' -> huu ich ma
+    khong bao loi gia. Chi la GATE tuy chon (npm run lint), khong chan build."""
+    ext = ('module.exports = {\n'
+           '  root: true,\n'
+           '  ignorePatterns: ["dist", "build", ".next", "node_modules", "*.config.js"],\n'
+           '  env: { browser: true, node: true, es2021: true },\n'
+           '  settings: { react: { version: "detect" } },\n'
+           '  parserOptions: { ecmaVersion: "latest", sourceType: "module", ecmaFeatures: { jsx: true } },\n'
+           '  plugins: ["react-hooks", "react-refresh"],\n')
+    if lang == "ts":
+        ext += ('  parser: "@typescript-eslint/parser",\n'
+                '  extends: ["eslint:recommended", "plugin:@typescript-eslint/recommended", "plugin:react-hooks/recommended"],\n'
+                '  rules: {\n'
+                '    "no-unused-vars": "off",\n'
+                '    "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],\n'
+                '    "@typescript-eslint/no-explicit-any": "off",\n'
+                '    "react-refresh/only-export-components": "off",\n'
+                '  },\n}\n')
+    else:
+        ext += ('  extends: ["eslint:recommended", "plugin:react-hooks/recommended"],\n'
+                '  rules: {\n'
+                '    "no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],\n'
+                '    "react-refresh/only-export-components": "off",\n'
+                '  },\n}\n')
+    return ext
+
+
+def _gen_use_is_desktop(lang, client):
+    """Hook chon MOT cay theo breakpoint (thay cho hidden md:block + block md:hidden ->
+    tranh mount CA 2 cay + chay listener song song). SSR mac dinh desktop, chinh lai
+    sau khi mount (khong gay hydration mismatch vi doi state o useEffect)."""
+    head = '"use client";\n\n' if client else ""
+    return head + (
+        'import { useEffect, useState } from "react";\n\n'
+        "// True khi viewport >= 768px (Tailwind md). Dung matchMedia, cleanup day du.\n"
+        "export function useIsDesktop() {\n"
+        f"  const [desktop, setDesktop] = useState{('<boolean>' if lang=='ts' else '')}(true);\n"
+        "  useEffect(() => {\n"
+        '    const mq = window.matchMedia("(min-width: 768px)");\n'
+        "    const on = () => setDesktop(mq.matches);\n"
+        "    on();\n"
+        '    mq.addEventListener("change", on);\n'
+        '    return () => mq.removeEventListener("change", on);\n'
+        "  }, []);\n"
+        "  return desktop;\n}\n")
+
+
+def _gen_api(lang):
+    """apis/landing: ham goi API cua BE (stub). Dien endpoint that vao day."""
+    ret = " : Promise<unknown>" if lang == "ts" else ""
+    return ("// API landing: dien endpoint that cua BE vao day roi bo comment.\n"
+            f"export async function fetchLandingData(){ret} {{\n"
+            "  // const res = await fetch('/api/landing');\n"
+            "  // return res.json();\n"
+            "  return null;\n}\n")
+
+
+def _api_hook(lang, api_rel="../apis/landing"):
+    """hooks/useLandingData: goi apis/landing.fetchLandingData va giu vao state."""
+    return ('import { useEffect, useState } from "react";\n'
+            f'import {{ fetchLandingData }} from "{api_rel}";\n\n'
+            "// Hook lay data landing tu API cua BE (logic goi nam o apis/landing).\n"
             "export function useLandingData() {\n"
             f"  const [data, setData] = useState{('<unknown>' if lang=='ts' else '')}(null);\n"
             "  useEffect(() => {\n"
-            "    // fetch('/api/landing').then((r) => r.json()).then(setData);\n"
+            "    fetchLandingData().then(setData).catch(() => {});\n"
             "  }, []);\n  return data;\n}\n")
+
+
+def _gen_routes(board, mobile, fluid, lang):
+    """routes.tsx (React): dinh nghia router bang react-router-dom. Route '/' -> trang
+    Landing; neu co ban mobile/fluid thi bao boc bang useIsDesktop de chon 1 cay."""
+    landing = board["landing_name"]
+    imports = ['import { createBrowserRouter } from "react-router-dom";',
+               f'import {landing} from "./pages/{landing}";']
+    home, element = "", f"<{landing} />"
+    if mobile:
+        mname = mobile["board"]["landing_name"]
+        imports.append(f'import {mname} from "./pages/{mname}";')
+        imports.append('import { useIsDesktop } from "./hooks/useIsDesktop";')
+        home = ("\nfunction Home() {\n  const isDesktop = useIsDesktop();\n"
+                f"  return isDesktop ? <{landing} /> : <{mname} />;\n}}\n")
+        element = "<Home />"
+    elif fluid:
+        imports.append('import MobileFluid from "./pages/MobileFluid";')
+        imports.append('import { useIsDesktop } from "./hooks/useIsDesktop";')
+        home = ("\nfunction Home() {\n  const isDesktop = useIsDesktop();\n"
+                f"  return isDesktop ? <{landing} /> : <MobileFluid />;\n}}\n")
+        element = "<Home />"
+    return ("\n".join(imports) + "\n" + home +
+            f'\nexport const router = createBrowserRouter([{{ path: "/", element: {element} }}]);\n')
+
+
+def _gen_app_react():
+    """App.tsx (React): root, gan RouterProvider + import CSS global."""
+    return ('import { RouterProvider } from "react-router-dom";\n'
+            'import { router } from "./routes";\n'
+            'import "./styles/index.css";\n\n'
+            "export default function App() {\n"
+            "  return <RouterProvider router={router} />;\n}\n")
 
 
 # ---------- REACT (Vite) ----------
@@ -1380,39 +1571,42 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
     # ngoai src nen khong bi xoa.)
     if src.exists():
         shutil.rmtree(src, ignore_errors=True)
+    dext = _dext(lang)
+    fluid = feats.get("fluid") and not mobile
     (src / "components").mkdir(parents=True, exist_ok=True)
     (src / "components" / f"Stage.{ext}").write_text(_gen_stage(lang, client=False), encoding="utf-8")
-    _write_landing_dir(src / "components" / "landing", board, lang, False, "../Stage", swiper=swiper, feats=feats)
+    # building-blocks -> src/components/landing[-mobile]; page composition -> src/pages
+    _write_landing_dir(src / "components" / "landing", board, lang, False, "../components/Stage",
+                       swiper=swiper, feats=feats, pages_dir=src / "pages",
+                       config_rel="../constants/landing.config", comp_base="../components/landing")
     if mobile:
-        _write_landing_dir(src / "components" / "landing-mobile", mobile["board"], lang, False, "../Stage", swiper=swiper, feats=feats)
+        _write_landing_dir(src / "components" / "landing-mobile", mobile["board"], lang, False,
+                           "../components/Stage", swiper=swiper, feats=feats, pages_dir=src / "pages",
+                           config_rel="../constants/landing.config", comp_base="../components/landing-mobile")
     if lang == "ts":
         (src / "types").mkdir(exist_ok=True)
         (src / "types" / "landing.ts").write_text(_gen_types(), encoding="utf-8")
         (src / "vite-env.d.ts").write_text('/// <reference types="vite/client" />\n', encoding="utf-8")
-    (src / f"useLandingData.{_dext(lang)}").write_text(_api_hook(lang), encoding="utf-8")
-    (src / f"landing.config.{_dext(lang)}").write_text(
+    # apis (goi BE) + hooks (custom hook)
+    (src / "apis").mkdir(exist_ok=True)
+    (src / "apis" / f"landing.{dext}").write_text(_gen_api(lang), encoding="utf-8")
+    (src / "hooks").mkdir(exist_ok=True)
+    (src / "hooks" / f"useLandingData.{dext}").write_text(_api_hook(lang, "../apis/landing"), encoding="utf-8")
+    if mobile or fluid:  # hook chon 1 cay theo breakpoint (dung o routes.tsx)
+        (src / "hooks" / f"useIsDesktop.{dext}").write_text(
+            _gen_use_is_desktop(lang, client=False), encoding="utf-8")
+    # constants (LINKS/LABELS)
+    (src / "constants").mkdir(exist_ok=True)
+    (src / "constants" / f"landing.config.{dext}").write_text(
         _gen_config(lang, feats.get("env_config"), client=False), encoding="utf-8")
     if feats.get("env_config"):
         (proj / ".env").write_text(_gen_env(client=False), encoding="utf-8")
-
-    imp = [f'import Landing from "./components/landing/{board["landing_name"]}";']
-    fluid = feats.get("fluid") and not mobile
-    if mobile:
-        imp.append(f'import MLanding from "./components/landing-mobile/{mobile["board"]["landing_name"]}";')
-    elif fluid:
-        imp.append('import MobileFluid from "./components/landing/MobileFluid";')
-    if mobile:
-        body = ('<div className="hidden md:block"><Landing /></div>\n'
-                '      <div className="block md:hidden"><MLanding /></div>')
-    elif fluid:
-        body = ('<div className="hidden md:block"><Landing /></div>\n'
-                '      <div className="block md:hidden"><MobileFluid /></div>')
-    else:
-        body = "<Landing />"
-    (src / f"App.{ext}").write_text(
-        'import "./index.css";\n' + "\n".join(imp) + "\n\n"
-        "export default function App() {\n  return (\n    <>\n      " + body + "\n    </>\n  );\n}\n", encoding="utf-8")
-    (src / "index.css").write_text(CSS_TW, encoding="utf-8")
+    # styles (css global)
+    (src / "styles").mkdir(exist_ok=True)
+    (src / "styles" / "index.css").write_text(CSS_TW, encoding="utf-8")
+    # router + root + entry
+    (src / f"routes.{ext}").write_text(_gen_routes(board, mobile, fluid, lang), encoding="utf-8")
+    (src / f"App.{ext}").write_text(_gen_app_react(), encoding="utf-8")
     nn = "!" if lang == "ts" else ""
     (src / f"main.{ext}").write_text(
         'import { createRoot } from "react-dom/client";\nimport App from "./App";\n\n'
@@ -1432,6 +1626,9 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
         '<meta property="og:type" content="website"/>\n'
         f'<meta property="og:title" content="{_t}"/>\n'
         f'<meta property="og:description" content="{_d}"/>\n'
+        '<meta name="twitter:card" content="summary_large_image"/>\n'
+        f'<meta name="twitter:title" content="{_t}"/>\n'
+        f'<meta name="twitter:description" content="{_d}"/>\n'
         '<meta name="theme-color" content="#0b1120"/>\n'
         f'<link rel="icon" href="{_fav}"/>\n{_preload}</head>\n<body>\n'
         f'<div id="root"></div>\n<script type="module" src="/src/main.{ext}"></script>\n</body>\n</html>\n',
@@ -1444,16 +1641,25 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
     (proj / "tailwind.config.js").write_text(TAILWIND_REACT, encoding="utf-8")
     (proj / "postcss.config.js").write_text(POSTCSS_ESM, encoding="utf-8")
     dev = {"@vitejs/plugin-react": "^4.3.1", "vite": "^5.4.0",
-           "tailwindcss": "^3.4.10", "postcss": "^8.4.41", "autoprefixer": "^10.4.20"}
+           "tailwindcss": "^3.4.10", "postcss": "^8.4.41", "autoprefixer": "^10.4.20",
+           "eslint": "^8.57.0", "eslint-plugin-react-hooks": "^4.6.2",
+           "eslint-plugin-react-refresh": "^0.4.9"}
+    # gate toi thieu truoc khi commit/deploy: lint + (voi TS) typecheck
+    scripts = {"dev": "vite", "build": "vite build", "preview": "vite preview",
+               "lint": "eslint . --ext .js,.jsx,.ts,.tsx"}
     if lang == "ts":
-        dev.update({"typescript": "^5.5.4", "@types/react": "^18.3.3", "@types/react-dom": "^18.3.0"})
+        dev.update({"typescript": "^5.5.4", "@types/react": "^18.3.3", "@types/react-dom": "^18.3.0",
+                    "@types/node": "^20", "@typescript-eslint/parser": "^7.18.0",
+                    "@typescript-eslint/eslint-plugin": "^7.18.0"})
+        scripts["typecheck"] = "tsc --noEmit"
         (proj / "tsconfig.json").write_text(TSCONFIG_VITE, encoding="utf-8")
-    deps = {"react": "^18.3.1", "react-dom": "^18.3.1"}
+    (proj / ".eslintrc.cjs").write_text(_eslintrc_react(lang), encoding="utf-8")
+    deps = {"react": "^18.3.1", "react-dom": "^18.3.1", "react-router-dom": "^6.26.0"}
     if feats.get("swiper_lib"):
         deps["swiper"] = "^11.2.6"
     (proj / "package.json").write_text(json.dumps({
         "name": _slug(layout.get("source", "psd-landing")), "private": True, "version": "0.1.0", "type": "module",
-        "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
+        "scripts": scripts,
         "dependencies": deps, "devDependencies": dev}, indent=2), encoding="utf-8")
     _copy_assets(out_dir, proj, "assets")
     if mobile:
@@ -1469,25 +1675,42 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None)
     _seo_into_board(layout, board)
     proj = Path(out_dir) / "next-app"
     ext = _ext(lang)
-    # DON app/ + components/ cu (tranh lan .jsx/.tsx -> import khong duoi nap nham ban cu)
-    for d in ("app", "components", "types", "lib"):
+    # DON cac thu muc cu (tranh lan .jsx/.tsx -> import khong duoi nap nham ban cu)
+    for d in ("app", "components", "types", "lib", "hooks", "apis", "constants"):
         p = proj / d
         if p.exists():
             shutil.rmtree(p, ignore_errors=True)
+    dext = _dext(lang)
+    fluid = feats.get("fluid") and not mobile
     (proj / "app").mkdir(parents=True, exist_ok=True)
     (proj / "components").mkdir(parents=True, exist_ok=True)
     (proj / "components" / f"Stage.{ext}").write_text(_gen_stage(lang, client=True), encoding="utf-8")
-    _write_landing_dir(proj / "components" / "landing", board, lang, True, "../Stage", swiper=swiper, feats=feats)
+    # Next app-router: route nam o app/, phan con lai (building-block + page composition
+    # Landing) o components/. config_rel tinh tu components/landing/ (sau 2 cap).
+    _write_landing_dir(proj / "components" / "landing", board, lang, True, "../Stage",
+                       swiper=swiper, feats=feats, pages_dir=None,
+                       config_rel="../../constants/landing.config", comp_base=".")
     if mobile:
-        _write_landing_dir(proj / "components" / "landing-mobile", mobile["board"], lang, True, "../Stage", swiper=swiper, feats=feats)
+        _write_landing_dir(proj / "components" / "landing-mobile", mobile["board"], lang, True, "../Stage",
+                           swiper=swiper, feats=feats, pages_dir=None,
+                           config_rel="../../constants/landing.config", comp_base=".")
     if lang == "ts":
         (proj / "types").mkdir(exist_ok=True)
         (proj / "types" / "landing.ts").write_text(_gen_types(), encoding="utf-8")
         (proj / "next-env.d.ts").write_text(
             '/// <reference types="next" />\n/// <reference types="next/image-types/global" />\n', encoding="utf-8")
-    (proj / "lib").mkdir(exist_ok=True)
-    (proj / "lib" / f"useLandingData.{_dext(lang)}").write_text('"use client";\n' + _api_hook(lang), encoding="utf-8")
-    (proj / f"landing.config.{_dext(lang)}").write_text(
+    # apis (goi BE) + hooks (custom hook - o Next PHAI "use client")
+    (proj / "apis").mkdir(exist_ok=True)
+    (proj / "apis" / f"landing.{dext}").write_text(_gen_api(lang), encoding="utf-8")
+    (proj / "hooks").mkdir(exist_ok=True)
+    (proj / "hooks" / f"useLandingData.{dext}").write_text(
+        '"use client";\n' + _api_hook(lang, "../apis/landing"), encoding="utf-8")
+    if mobile or fluid:
+        (proj / "hooks" / f"useIsDesktop.{dext}").write_text(
+            _gen_use_is_desktop(lang, client=True), encoding="utf-8")
+    # constants (LINKS/LABELS)
+    (proj / "constants").mkdir(exist_ok=True)
+    (proj / "constants" / f"landing.config.{dext}").write_text(
         _gen_config(lang, feats.get("env_config"), client=True), encoding="utf-8")
     if feats.get("env_config"):
         (proj / ".env").write_text(_gen_env(client=True), encoding="utf-8")
@@ -1498,6 +1721,7 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None)
         "title": _page_title(board),
         "description": _page_desc(board),
         "openGraph": {"title": _page_title(board), "description": _page_desc(board), "type": "website"},
+        "twitter": {"card": "summary_large_image", "title": _page_title(board), "description": _page_desc(board)},
     }, ensure_ascii=False, indent=2)
     (proj / "app" / f"layout.{ext}").write_text(
         'import "./globals.css";\n\n'
@@ -1508,36 +1732,51 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None)
     (proj / "public").mkdir(exist_ok=True)
     (proj / "public" / "robots.txt").write_text("User-agent: *\nAllow: /\n", encoding="utf-8")
     imp = [f'import Landing from "../components/landing/{board["landing_name"]}";']
-    fluid = feats.get("fluid") and not mobile
+    mcomp = "MLanding" if mobile else ("MobileFluid" if fluid else None)
     if mobile:
         imp.append(f'import MLanding from "../components/landing-mobile/{mobile["board"]["landing_name"]}";')
     elif fluid:
         imp.append('import MobileFluid from "../components/landing/MobileFluid";')
-    if mobile:
-        body = ('<div className="hidden md:block"><Landing /></div>\n'
-                '      <div className="block md:hidden"><MLanding /></div>')
-    elif fluid:
-        body = ('<div className="hidden md:block"><Landing /></div>\n'
-                '      <div className="block md:hidden"><MobileFluid /></div>')
+    if mcomp:
+        # Mount MOT cay theo breakpoint (xem hook). page thanh client component vi
+        # dung hook; metadata van nam o layout.tsx (server) nen SEO khong anh huong.
+        imp.append('import { useIsDesktop } from "../hooks/useIsDesktop";')
+        page = ('"use client";\n\n' + "\n".join(imp) + "\n\n"
+                "export default function Page() {\n"
+                "  const isDesktop = useIsDesktop();\n"
+                f"  return (\n    <>{{isDesktop ? <Landing /> : <{mcomp} />}}</>\n  );\n}}\n")
     else:
-        body = "<Landing />"
-    (proj / "app" / f"page.{ext}").write_text(
-        "\n".join(imp) + "\n\nexport default function Page() {\n  return (\n    <>\n      " + body + "\n    </>\n  );\n}\n",
-        encoding="utf-8")
+        page = ("\n".join(imp) + "\n\nexport default function Page() {\n"
+                "  return (\n    <>\n      <Landing />\n    </>\n  );\n}\n")
+    (proj / "app" / f"page.{ext}").write_text(page, encoding="utf-8")
 
-    (proj / "next.config.js").write_text("/** @type {import('next').NextConfig} */\nmodule.exports = {};\n", encoding="utf-8")
+    # images.formats: uu tien AVIF/WebP khi dung next/image optimizer (chay tren
+    # `next start`/Vercel). LUU Y: hien component van dung <img> thuong; de huong loi
+    # tu day can doi sang <Image> cua next/image (viec nay dang hoan - xem README yeu cau).
+    (proj / "next.config.js").write_text(
+        "/** @type {import('next').NextConfig} */\n"
+        "module.exports = {\n"
+        "  images: { formats: ['image/avif', 'image/webp'] },\n"
+        "};\n", encoding="utf-8")
     (proj / "tailwind.config.js").write_text(TAILWIND_NEXT, encoding="utf-8")
     (proj / "postcss.config.js").write_text(POSTCSS_CJS, encoding="utf-8")
-    dev = {"tailwindcss": "^3.4.10", "postcss": "^8.4.41", "autoprefixer": "^10.4.20"}
+    dev = {"tailwindcss": "^3.4.10", "postcss": "^8.4.41", "autoprefixer": "^10.4.20",
+           "eslint": "^8.57.0", "eslint-config-next": "^14.2.5"}
+    # gate toi thieu: `next lint` + (voi TS) typecheck
+    nscripts = {"dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint"}
     if lang == "ts":
         dev.update({"typescript": "^5.5.4", "@types/react": "^18.3.3", "@types/react-dom": "^18.3.0", "@types/node": "^20"})
+        nscripts["typecheck"] = "tsc --noEmit"
         (proj / "tsconfig.json").write_text(TSCONFIG_NEXT, encoding="utf-8")
+    # Next dung eslint-config-next (core-web-vitals) - khong can plugin react-hooks rieng
+    (proj / ".eslintrc.json").write_text(
+        json.dumps({"extends": "next/core-web-vitals"}, indent=2), encoding="utf-8")
     ndeps = {"next": "^14.2.5", "react": "^18.3.1", "react-dom": "^18.3.1"}
     if feats.get("swiper_lib"):
         ndeps["swiper"] = "^11.2.6"
     (proj / "package.json").write_text(json.dumps({
         "name": _slug(layout.get("source", "psd-landing")), "private": True, "version": "0.1.0",
-        "scripts": {"dev": "next dev", "build": "next build", "start": "next start"},
+        "scripts": nscripts,
         "dependencies": ndeps,
         "devDependencies": dev}, indent=2), encoding="utf-8")
     _copy_assets(out_dir, proj, "assets")
