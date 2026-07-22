@@ -112,6 +112,50 @@ def _save_groups(vdir, groups):
     _groups_path(vdir).write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# ---------------- CHINH SUA per-layer (editor kieu Photoshop) ----------------
+# edits.json = { "<layerId>": {bbox?, z?, text?, link?, alt?} }. Nen chung cho
+# ca 3 tru cot: keo/resize/z-order (bbox+z), chu that (text), link/nut+alt.
+def _edits_path(vdir):
+    return Path(vdir) / "edits.json"
+
+
+def _load_edits(vdir):
+    p = _edits_path(vdir)
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+
+def _save_edits(vdir, edits):
+    _edits_path(vdir).write_text(json.dumps(edits, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# Khoa ghi edits.json: FE co the ban nhieu /edit gan nhu dong thoi (vd doi link +
+# alt cung luc) -> read-modify-write phai tuan tu, khong se ghi de mat key.
+_EDIT_LOCK = threading.Lock()
+
+
+def _apply_edits(vdir, layout):
+    """Ap edits len layout HIEU LUC: bbox override, z-order (sort on dinh), text/link/alt.
+    Gan l['z'] cho MOI layer de manifest doc lai duoc. z mac dinh 0 (giu thu tu goc)."""
+    edits = _load_edits(vdir)
+    for l in layout["layers"]:
+        e = edits.get(l["id"]) or {}
+        if e.get("bbox"):
+            l["bbox"] = {**l["bbox"], **{k: e["bbox"][k] for k in ("x", "y", "width", "height")
+                                         if k in e["bbox"]}}
+        if e.get("alt") is not None:
+            l["alt"] = e["alt"]
+        if e.get("link"):
+            l["link"] = e["link"]
+        if e.get("text"):
+            t = dict(l.get("text") or {})
+            t.update(e["text"])
+            l["text"] = t
+        l["z"] = e.get("z", 0)
+    # sort on dinh theo z (Python sort stable -> z bang nhau giu nguyen thu tu ve)
+    layout["layers"].sort(key=lambda l: l.get("z", 0))
+    return layout
+
+
 def _norm_group_name(name):
     """Chuan hoa ten de gom nhom goi y: bo ' copy', ' copy 2', duoi so/khoang trang."""
     import re
@@ -193,7 +237,7 @@ def _effective_layout(vdir):
     layout = _pristine_layout(vdir)
     groups = _load_groups(vdir)
     if not groups:
-        return layout
+        return _apply_edits(vdir, layout)
     by_id = {l["id"]: l for l in layout["layers"]}
     assets_dir = vdir / "assets"
     for g in groups:
@@ -219,12 +263,13 @@ def _effective_layout(vdir):
         idxs = [i for i, l in enumerate(layout["layers"]) if l["id"] in mset]
         pos = min(idxs) if idxs else len(layout["layers"])
         node = {"id": gid, "name": g.get("name") or gid, "kind": "pixel",
-                "bbox": ubbox, "opacity": 1.0, "parent": None, "asset": asset_rel,
-                "grouped": [m["id"] for m in members]}
+                "bbox": ubbox, "opacity": 1.0,
+                "parent": (members[0].get("parent") if members else None),  # giu trong folder goc
+                "asset": asset_rel, "grouped": [m["id"] for m in members]}
         layout["layers"] = ([l for l in layout["layers"][:pos] if l["id"] not in mset]
                             + [node]
                             + [l for l in layout["layers"][pos:] if l["id"] not in mset])
-    return layout
+    return _apply_edits(vdir, layout)
 
 
 def _suggest_groups(layout):
@@ -254,6 +299,40 @@ def _suggest_groups(layout):
     return out
 
 
+def _collect_psd_groups(layout):
+    """Lay cac GROUP (folder) co san trong PSD -> de gop nguyen folder thanh 1 anh.
+    Tra ve list {id, name, members(id la anh la con-chau), n} - bo group bao trum
+    toan bo trang, sort folder nho truoc (huu ich hon). Dung tu layout PRISTINE."""
+    from collections import defaultdict
+    children = defaultdict(list)
+    node = {}
+    for l in layout["layers"]:
+        node[l["id"]] = l
+        children[l.get("parent")].append(l["id"])
+
+    def leaves(gid):
+        out = []
+        for cid in children.get(gid, []):
+            c = node[cid]
+            if c.get("kind") == "group":
+                out += leaves(cid)
+            elif c.get("asset"):
+                out.append(cid)
+        return out
+
+    total = sum(1 for l in layout["layers"] if l.get("asset"))
+    groups = []
+    for l in layout["layers"]:
+        if l.get("kind") != "group":
+            continue
+        mem = leaves(l["id"])
+        if 2 <= len(mem) < max(total, 3):     # bo folder bao trum ca trang
+            groups.append({"id": l["id"], "name": (l.get("name") or l["id"]),
+                           "members": mem, "n": len(mem)})
+    groups.sort(key=lambda g: g["n"])
+    return groups[:60]
+
+
 def _variant_manifest(job_id, vdir, url_prefix):
     """
     Doc layout HIEU LUC (pristine + group) cua 1 bien the -> manifest cho frontend:
@@ -274,22 +353,42 @@ def _variant_manifest(job_id, vdir, url_prefix):
                 return i
         return len(secs) - 1 if cy >= secs[-1]["y1"] else 0
 
+    # vi tri goc trong PSD (thu tu ve): dung de dung cay layer DUNG THU TU nhu Photoshop
+    order_of = {l["id"]: i for i, l in enumerate(layout["layers"])}
+
     items = []
     for l in layout["layers"]:
         if not l.get("asset"):   # bo group/layer khong co anh
             continue
         b = l["bbox"]
+        tx = l.get("text") or {}
         items.append({
             "id": l["id"],
             "name": (l.get("name") or l["id"]),
             "kind": l.get("kind"),
+            "parent": l.get("parent"),         # id folder cha (dựng cây kiểu PTS)
+            "order": order_of.get(l["id"], 0),  # vi tri trong PSD (ve: nho=duoi/nen)
             "bbox": b,
             "asset": base + l["asset"],
-            "text": bool((l.get("text") or {}).get("content")),
+            "text": bool(tx.get("content")),
             "section": _section_of(b["y"] + b["height"] / 2),
             "group": bool(l.get("grouped")),          # la layer GOP (nhieu layer)
             "count": len(l.get("grouped") or []),     # so layer thanh vien
+            "z": l.get("z", 0),                       # thu tu lop (edits)
+            # du lieu cho tru cot 2/3 (chinh sua text, gan link/alt)
+            "textData": {"content": tx.get("content", ""), "size": tx.get("size"),
+                         "color": tx.get("color"), "asText": bool(tx.get("asText"))} if tx.get("content") else None,
+            "link": l.get("link"),
+            "alt": l.get("alt", ""),
         })
+
+    # Group co san trong PSD (folder) -> goi y gop nguyen folder
+    pristine = _pristine_layout(vdir)
+    pbb = {l["id"]: l.get("bbox") for l in pristine["layers"]}
+    psd_groups = []
+    for g in _collect_psd_groups(pristine):
+        ys = [pbb[m]["y"] + pbb[m]["height"] / 2 for m in g["members"] if pbb.get(m)]
+        psd_groups.append({**g, "section": _section_of(sum(ys) / len(ys)) if ys else 0})
 
     return {
         "canvas": canvas,
@@ -298,6 +397,11 @@ def _variant_manifest(job_id, vdir, url_prefix):
         "layers": items,
         "groups": _load_groups(vdir),
         "suggestions": _suggest_groups(layout),
+        "psdGroups": psd_groups,
+        # cac node FOLDER (group PSD) de dung cay layer kieu Photoshop (kem order)
+        "nodes": [{"id": l["id"], "name": (l.get("name") or l["id"]), "parent": l.get("parent"),
+                   "order": order_of.get(l["id"], 0)}
+                  for l in layout["layers"] if l.get("kind") == "group"],
     }
 
 
@@ -370,17 +474,23 @@ def _run_export(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m):
                 shutil.rmtree(p, ignore_errors=True)
 
         job["step"] = "Sinh code..."
+        asset_names = None
         if fmt == "slices":
             render_slices(str(out), swiper=swiper)
             job["preview"] = f"/result/{job_id}/index.html"
             job["files"] = []
             zip_src = out
             zip_include = ["index.html", "style.css", "assets", "sections"]
+            asset_names = _used_asset_names(out)   # chi zip anh dang dung
         else:
             proj = export_web(str(out), framework=fmt, lang=lang,
                               mobile_dir=str(mobile_dir) if has_mobile else None,
                               detect_repeats=feats.get("fluid", False),
                               swiper=swiper, feats=feats)
+            # bo anh thua (layer an / thanh vien da gop) khoi ban copy trong project
+            _prune_assets(Path(proj) / "public" / "assets", _used_asset_names(out))
+            if has_mobile:
+                _prune_assets(Path(proj) / "public" / "assets-m", _used_asset_names(mobile_dir))
             job["preview"] = None
             zip_src = Path(proj)
             zip_include = None  # zip toan bo project
@@ -389,7 +499,7 @@ def _run_export(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m):
 
         job["step"] = "Nen ZIP..."
         zip_path = JOBS_DIR / job_id / "result.zip"
-        _make_zip(zip_src, zip_path, zip_include)
+        _make_zip(zip_src, zip_path, zip_include, asset_names=asset_names)
         job["download"] = f"/download/{job_id}"
 
         job["status"] = "done"
@@ -429,12 +539,47 @@ def _run_preview(job_id, swiper, disabled_d, disabled_m):
         job["trace"] = traceback.format_exc()[-1500:]
 
 
-def _make_zip(src, zip_path, include=None):
+def _used_asset_names(vdir):
+    """Ten cac file asset THUC SU dung trong layout.json da loc (bo layer an + thanh
+    vien da gop). Dung de KHONG dong goi anh thua vao source web."""
+    p = Path(vdir) / "layout.json"
+    if not p.exists():
+        return None
+    try:
+        lay = json.loads(p.read_text(encoding="utf-8"))
+        return {Path(l["asset"]).name for l in lay.get("layers", []) if l.get("asset")}
+    except Exception:
+        return None
+
+
+def _prune_assets(assets_dir, used):
+    """Xoa cac file trong assets_dir khong nam trong `used` (chi ap cho ban COPY
+    trong project react/next, khong dung vao cache parse)."""
+    if used is None:
+        return
+    d = Path(assets_dir)
+    if not d.exists():
+        return
+    for f in d.iterdir():
+        if f.is_file() and f.name not in used:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+
+def _make_zip(src, zip_path, include=None, asset_names=None):
     src = Path(src)
+
+    def _skip(p):
+        # bo anh khong dung (asset an / thanh vien da gop) khoi ZIP
+        return (asset_names is not None and p.suffix.lower() in (".webp", ".png")
+                and "assets" in p.parts and p.name not in asset_names)
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         if include is None:
             for p in src.rglob("*"):
-                if p.is_file() and "node_modules" not in str(p):
+                if p.is_file() and "node_modules" not in str(p) and not _skip(p):
                     zf.write(p, p.relative_to(src))
         else:
             for name in include:
@@ -443,7 +588,7 @@ def _make_zip(src, zip_path, include=None):
                     zf.write(item, name)
                 elif item.is_dir():
                     for p in item.rglob("*"):
-                        if p.is_file():
+                        if p.is_file() and not _skip(p):
                             zf.write(p, p.relative_to(src))
 
 
@@ -589,6 +734,39 @@ def ungroup():
     return jsonify({"manifest": man})
 
 
+@app.route("/edit", methods=["POST"])
+def edit():
+    """Luu chinh sua per-layer (bbox/z/text/link/alt). Merge vao edits.json.
+    Fire-and-forget tu frontend; export/preview doc lai qua _effective_layout."""
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    variant = data.get("variant", "desktop")
+    job = jobs.get(job_id)
+    vdir = _variant_dir(job_id, variant)
+    if not job or not (vdir / "layout.json").exists():
+        return jsonify({"error": "Chua co du lieu parse."}), 400
+    patch = data.get("patch") or {}       # {layerId: {bbox?/z?/text?/link?/alt?}}
+    with _EDIT_LOCK:                       # tuan tu hoa read-modify-write edits.json
+        edits = _load_edits(vdir)
+        for lid, p in (patch.items() if isinstance(patch, dict) else []):
+            if not isinstance(p, dict):
+                continue
+            cur = edits.get(lid) or {}
+            for k, v in p.items():
+                if k in ("bbox", "text", "link") and isinstance(v, dict):
+                    cur[k] = {**(cur.get(k) or {}), **v}   # merge sau (giu key cu)
+                elif v is None:
+                    cur.pop(k, None)          # gui null -> xoa override key do
+                else:
+                    cur[k] = v
+            if cur:
+                edits[lid] = cur
+            else:
+                edits.pop(lid, None)
+        _save_edits(vdir, edits)
+    return jsonify({"ok": True})
+
+
 @app.route("/preview", methods=["POST"])
 def preview():
     """Xem thu: render slices theo lua chon anh hien tai (khong ZIP)."""
@@ -642,176 +820,301 @@ def index():
 INDEX_HTML = """<!doctype html>
 <html lang="vi"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>psd2html - Chuyen PSD sang code</title>
+<title>psd2html — Chuyển PSD sang web</title>
 <style>
-  :root{--brand:#2563eb;--bg:#0f172a;--card:#1e293b;--line:#334155;--txt:#e2e8f0;--muted:#94a3b8}
+  :root{--bg:#0b1120;--bg2:#0f1a30;--card:#141f38;--card2:#1a2744;--line:#2a3a5c;
+    --txt:#e8eef8;--muted:#93a4c4;--brand:#3b82f6;--brand2:#60a5fa;--ok:#22c55e;
+    --sky:#38bdf8;--danger:#f87171;--grp:#22a06b;--r:12px;--shadow:0 8px 30px rgba(0,0,0,.35)}
   *{box-sizing:border-box}
-  body{margin:0;font-family:system-ui,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--txt)}
-  .wrap{max-width:1180px;margin:0 auto;padding:24px}
-  h1{font-size:22px;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 20px;font-size:14px}
+  body{margin:0;font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif;line-height:1.45;
+    background:radial-gradient(1100px 560px at 82% -12%,#13284d 0,transparent 60%),var(--bg);color:var(--txt)}
+  .wrap{max-width:1440px;margin:0 auto;padding:22px}
+  h1{font-size:22px;margin:0;display:flex;align-items:center;gap:9px}
+  .sub{color:var(--muted);margin:6px 0 16px;font-size:13.5px}
+  /* thanh buoc */
+  .steps{display:flex;gap:8px;align-items:center;margin:12px 0 20px;flex-wrap:wrap}
+  .steps .st{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;font-weight:600}
+  .steps .st .n{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;background:var(--card);border:1px solid var(--line);font-size:12px}
+  .steps .st.on{color:var(--txt)} .steps .st.on .n{background:var(--brand);border-color:var(--brand);color:#fff}
+  .steps .st.done .n{background:var(--ok);border-color:var(--ok);color:#04220f}
+  .steps .sep{flex:0 0 24px;height:2px;background:var(--line);border-radius:2px}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media(max-width:700px){.grid{grid-template-columns:1fr}}
-  .drop{border:2px dashed var(--line);border-radius:12px;padding:26px;text-align:center;cursor:pointer;background:var(--card);transition:.15s}
-  .drop:hover,.drop.over{border-color:var(--brand);background:#243149}
-  .drop .big{font-size:15px}.drop .fname{color:#4ade80;margin-top:8px;font-size:13px;word-break:break-all}
+  .drop{border:2px dashed var(--line);border-radius:var(--r);padding:28px;text-align:center;cursor:pointer;background:var(--card);transition:.15s}
+  .drop:hover,.drop.over{border-color:var(--brand);background:var(--card2);transform:translateY(-1px)}
+  .drop .big{font-size:15px}.drop .fname{color:#5eead4;margin-top:8px;font-size:13px;word-break:break-all}
   .drop small{color:var(--muted)}
-  .row{display:flex;gap:16px;align-items:center;margin:18px 0;flex-wrap:wrap}
-  .fmt{display:flex;gap:10px;flex-wrap:wrap}
-  .fmt label{border:1px solid var(--line);border-radius:8px;padding:8px 14px;cursor:pointer;background:var(--card);font-size:14px}
-  .fmt input{margin-right:6px}
-  .fmt input:checked+span{color:#93c5fd;font-weight:600}
-  button{background:var(--brand);color:#fff;border:0;border-radius:8px;padding:12px 26px;font-size:15px;font-weight:600;cursor:pointer}
-  button:disabled{opacity:.5;cursor:default}
-  button.ghost{background:#334155}
-  .panel{margin-top:20px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;display:none}
+  .row{display:flex;gap:14px;align-items:center;margin:16px 0;flex-wrap:wrap}
+  .lbl{color:var(--muted);font-size:13px;font-weight:600}
+  .fmt{display:flex;gap:8px;flex-wrap:wrap}
+  .fmt label{border:1px solid var(--line);border-radius:9px;padding:8px 13px;cursor:pointer;background:var(--card);font-size:13.5px;transition:.12s;display:inline-flex;align-items:center}
+  .fmt label:hover{border-color:var(--brand2)}
+  .fmt input{margin-right:7px}
+  .fmt input:checked+span{color:#bfdbfe;font-weight:600}
+  .fmt label:has(input:checked){border-color:var(--brand);background:var(--card2)}
+  button{background:linear-gradient(180deg,var(--brand2),var(--brand));color:#fff;border:0;border-radius:10px;padding:11px 22px;font-size:14.5px;font-weight:600;cursor:pointer;transition:.12s;box-shadow:0 2px 8px rgba(37,99,235,.3)}
+  button:hover{filter:brightness(1.07)} button:active{transform:translateY(1px)}
+  button:disabled{opacity:.5;cursor:default;box-shadow:none}
+  button.ghost{background:var(--card2);box-shadow:none;border:1px solid var(--line);color:var(--txt)}
+  button.ghost:hover{border-color:var(--brand2)}
+  button.sm{padding:6px 12px;font-size:12.5px;border-radius:8px}
+  .panel{margin-top:18px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;display:none;box-shadow:var(--shadow)}
   .panel.show{display:block}
-  .bar{height:8px;background:#334155;border-radius:6px;overflow:hidden;margin:10px 0}
-  .bar>i{display:block;height:100%;background:var(--brand);width:30%;animation:pulse 1.2s infinite}
+  .bar{height:8px;background:#22304d;border-radius:6px;overflow:hidden;margin:10px 0}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--brand),var(--sky));width:40%;animation:pulse 1.2s infinite}
   @keyframes pulse{0%{opacity:.5}50%{opacity:1}100%{opacity:.5}}
-  iframe{width:100%;height:560px;border:1px solid var(--line);border-radius:8px;background:#fff;margin-top:12px}
-  a.dl{display:inline-block;background:#16a34a;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;margin-top:12px;font-weight:600}
-  .err{color:#fca5a5;white-space:pre-wrap;font-family:monospace;font-size:12px}
-  .files{color:var(--muted);font-size:12px;font-family:monospace;max-height:160px;overflow:auto;margin-top:10px}
-  /* editor */
-  .ed{display:grid;grid-template-columns:minmax(280px,420px) 1fr;gap:18px}
-  @media(max-width:820px){.ed{grid-template-columns:1fr}}
-  .prevBox{position:sticky;top:16px;align-self:start;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:88vh;overflow:auto}
-  .stage{position:relative;margin:0 auto;background:#fff;background-image:linear-gradient(45deg,#e2e8f0 25%,transparent 25%,transparent 75%,#e2e8f0 75%),linear-gradient(45deg,#e2e8f0 25%,#fff 25%,#fff 75%,#e2e8f0 75%);background-size:20px 20px;background-position:0 0,10px 10px}
-  .stage img{position:absolute;display:block}
-  .stage img.off{display:none}
-  .secmark{position:absolute;left:0;right:0;border-top:2px dashed rgba(37,99,235,.5);pointer-events:none}
-  .secmark span{position:absolute;top:2px;left:4px;font-size:10px;background:rgba(37,99,235,.85);color:#fff;padding:1px 6px;border-radius:0 0 6px 0}
-  .tabs{display:flex;gap:8px;margin-bottom:10px}
-  .tabs button{padding:6px 14px;font-size:13px;background:#334155}
-  .tabs button.active{background:var(--brand)}
-  .sec{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:hidden}
-  .sec>h4{margin:0;padding:10px 12px;background:#111a2e;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+  iframe{width:100%;height:600px;border:1px solid var(--line);border-radius:10px;background:#fff;margin-top:12px}
+  a.dl{display:inline-block;background:linear-gradient(180deg,#34d399,#16a34a);color:#04220f;padding:11px 20px;border-radius:10px;text-decoration:none;margin-top:12px;font-weight:700}
+  .err{color:#fecaca;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px;background:#2a1418;border:1px solid #7f1d1d;border-radius:8px;padding:8px;margin-top:8px}
+  .files{color:var(--muted);font-size:12px;font-family:ui-monospace,monospace;max-height:170px;overflow:auto;margin-top:10px;background:var(--bg2);border-radius:8px;padding:8px}
+  /* thanh cong cu editor */
+  .etool{position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    background:rgba(15,26,48,.97);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:12px;padding:9px 12px;margin:0 0 14px}
+  .etool .title{font-size:15px;font-weight:700;display:flex;align-items:center;gap:7px}
+  .etool .spacer{flex:1}
+  .chip{font-size:12.5px;color:var(--muted);background:var(--bg2);border:1px solid var(--line);border-radius:20px;padding:5px 11px;white-space:nowrap}
+  .tabs{display:inline-flex;background:var(--bg2);border:1px solid var(--line);border-radius:9px;overflow:hidden}
+  .tabs button{padding:7px 13px;font-size:13px;background:transparent;box-shadow:none;border:0;border-radius:0;color:var(--muted);font-weight:600}
+  .tabs button.active{background:var(--brand);color:#fff}
+  #grpMode{background:var(--card2);box-shadow:none;border:1px solid var(--line);color:var(--txt);padding:7px 13px;font-size:13px;border-radius:9px}
+  #grpMode.active{background:var(--grp);color:#eafff3;border-color:var(--grp)}
+  /* editor split */
+  .ed{display:grid;grid-template-columns:minmax(440px,1.35fr) minmax(300px,1fr);gap:18px}
+  @media(max-width:860px){.ed{grid-template-columns:1fr}}
+  .prevBox{position:sticky;top:66px;align-self:start;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:12px;max-height:90vh;overflow:auto}
+  .prevBox .cap{font-size:11px;color:var(--muted);text-align:center;margin-bottom:8px}
+  .pvtop{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin-bottom:8px}
+  .zoom{display:inline-flex;align-items:center;gap:2px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:2px}
+  .zoom button{background:transparent;box-shadow:none;border:0;color:var(--txt);font-size:15px;font-weight:700;padding:2px 9px;border-radius:6px;line-height:1}
+  .zoom button:hover{background:var(--card2)}
+  .zoom b{font-size:11px;min-width:38px;text-align:center;color:var(--muted)}
+  .secNav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px}
+  .secNav button{padding:5px 10px;font-size:12px;background:var(--bg2);border:1px solid var(--line);color:var(--muted);box-shadow:none;border-radius:7px;font-weight:600}
+  .secNav button:hover{border-color:var(--brand2)}
+  .secNav button.active{background:var(--brand);color:#fff;border-color:var(--brand)}
+  .stageClip{overflow:hidden;border-radius:6px;margin:0 auto}
+  .stage{position:relative;margin:0 auto;touch-action:none;border-radius:6px;background-color:#fff;
+    background-image:linear-gradient(45deg,#dbe3ef 25%,transparent 25%,transparent 75%,#dbe3ef 75%),linear-gradient(45deg,#dbe3ef 25%,#fff 25%,#fff 75%,#dbe3ef 75%);background-size:18px 18px;background-position:0 0,9px 9px}
+  .stage img,.stage .lyr{position:absolute;display:block}
+  .stage .lyr.off,.stage img.off{display:none}
+  .stage .txt{overflow:hidden}
+  .stage .lyr.sel{outline:2px solid var(--sky);z-index:50}
+  .secmark{position:absolute;left:0;right:0;border-top:2px dashed rgba(56,189,248,.55);pointer-events:none}
+  .secmark span{position:absolute;top:2px;left:4px;font-size:10px;background:rgba(56,189,248,.9);color:#04212e;font-weight:700;padding:1px 6px;border-radius:0 0 6px 0}
+  .selov{position:absolute;border:1.5px solid var(--sky);box-shadow:0 0 0 9999px rgba(2,6,20,.04);z-index:60}
+  .selov .mv{position:absolute;inset:0;cursor:move;touch-action:none}
+  .selov .hnd{position:absolute;width:11px;height:11px;background:var(--sky);border:1px solid #fff;border-radius:2px;touch-action:none}
+  .selov .hnd.nw{left:-6px;top:-6px;cursor:nwse-resize}.selov .hnd.ne{right:-6px;top:-6px;cursor:nesw-resize}
+  .selov .hnd.sw{left:-6px;bottom:-6px;cursor:nesw-resize}.selov .hnd.se{right:-6px;bottom:-6px;cursor:nwse-resize}
+  .selov .hnd.n{left:50%;margin-left:-6px;top:-6px;cursor:ns-resize}.selov .hnd.s{left:50%;margin-left:-6px;bottom:-6px;cursor:ns-resize}
+  .selov .hnd.w{top:50%;margin-top:-6px;left:-6px;cursor:ew-resize}.selov .hnd.e{top:50%;margin-top:-6px;right:-6px;cursor:ew-resize}
+  /* danh sach layer */
+  .listhead{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .search{flex:1;display:flex;align-items:center;gap:7px;background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:7px 11px}
+  .search input{flex:1;background:transparent;border:0;color:var(--txt);font-size:13px;outline:none}
+  .sec{border:1px solid var(--line);border-radius:11px;margin-bottom:10px;overflow:hidden;background:var(--card)}
+  .sec>h4{margin:0;padding:10px 12px;background:var(--card2);font-size:13.5px;display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
   .sec>h4 .cnt{color:var(--muted);font-weight:400;font-size:12px}
-  .sec>h4 .toggle{margin-left:auto;font-size:12px;color:#93c5fd;background:#1e293b;border:1px solid var(--line);padding:3px 8px;border-radius:6px}
-  .layers{padding:6px;display:grid;grid-template-columns:1fr 1fr;gap:6px}
-  @media(max-width:520px){.layers{grid-template-columns:1fr}}
-  .item{display:flex;align-items:center;gap:8px;padding:5px;border:1px solid var(--line);border-radius:8px;background:#0f172a;cursor:pointer}
-  .item.off{opacity:.4}
-  .item .th{width:44px;height:44px;object-fit:contain;background:#1e293b;border-radius:5px;flex:0 0 44px}
-  .item .nm{font-size:12px;line-height:1.25;word-break:break-word;flex:1;min-width:0}
-  .item .badge{font-size:9px;padding:1px 5px;border-radius:4px;background:#334155;color:#cbd5e1;margin-left:4px}
-  .item input{flex:0 0 auto}
-  .item.gsel{outline:2px solid #2563eb;background:#12233f}
-  .item.grp{background:#0e1f16;border-color:#1f7a4d}
-  .item .gbadge{font-size:9px;padding:1px 5px;border-radius:4px;background:#1f7a4d;color:#d1fae5;margin-left:4px}
+  .sec>h4 .toggle{margin-left:auto;font-size:12px;color:#bfdbfe;background:var(--bg2);border:1px solid var(--line);padding:4px 9px;border-radius:7px}
+  .sec>h4 .toggle:hover{border-color:var(--brand2)}
+  .layers{padding:8px;display:grid;grid-template-columns:1fr 1fr;gap:7px}
+  @media(max-width:560px){.layers{grid-template-columns:1fr}}
+  .item{display:flex;align-items:center;gap:8px;padding:6px;border:1px solid var(--line);border-radius:9px;background:var(--bg2);cursor:pointer;transition:.1s}
+  .item:hover{border-color:var(--brand2)}
+  .item.off{opacity:.42}
+  .item .th{width:46px;height:46px;object-fit:contain;background:#0e1830;border-radius:6px;flex:0 0 46px}
+  .item .nm{font-size:12px;line-height:1.28;word-break:break-word;flex:1;min-width:0}
+  .item .badge{font-size:9px;padding:1px 5px;border-radius:4px;background:#33507e;color:#dbeafe;margin-left:4px}
+  .item input{flex:0 0 auto;width:16px;height:16px}
+  .item.gsel{outline:2px solid var(--brand);background:#12233f}
+  .item.grp{background:#0e2119;border-color:#1f7a4d}
+  .item .gbadge{font-size:9px;padding:1px 5px;border-radius:4px;background:var(--grp);color:#d1fae5;margin-left:4px}
   .item .untie{margin-left:auto;font-size:11px;color:#fca5a5;background:#2a1418;border:1px solid #7f1d1d;border-radius:6px;padding:2px 7px;cursor:pointer;flex:0 0 auto}
+  .item.sel{outline:2px solid var(--sky)}
   .gmode .item{cursor:copy}
-  #grpMode.active{background:#1f7a4d;color:#eafff3;border-color:#1f7a4d}
-  .sug-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:#0f223b;border:1px solid #2f4a75;color:#bcd3f5;border-radius:20px;padding:5px 12px;margin:0 6px 6px 0;cursor:pointer}
-  .sug-chip:hover{background:#16325a}
-  .hint{color:var(--muted);font-size:13px;margin:0 0 12px}
+  /* cây layer kiểu Photoshop */
+  .tree{display:flex;flex-direction:column;gap:1px}
+  .tree .item{border:0;background:transparent;border-radius:7px;padding:4px 6px;margin:0;gap:7px}
+  .tree .item:hover{background:var(--card2)}
+  .tree .item .th{width:30px;height:30px;flex:0 0 30px}
+  .tree .item.gsel{outline:2px solid var(--brand);background:#12233f}
+  .tree .item.grp{background:#0e2119}
+  .tree .item.sel{outline:2px solid var(--sky)}
+  .frow{display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:7px;cursor:pointer;user-select:none}
+  .frow:hover{background:var(--card2)}
+  .frow .tw{width:14px;flex:0 0 14px;text-align:center;color:var(--muted);font-size:11px}
+  .frow .fico{flex:0 0 auto}
+  .frow .fname{flex:1;min-width:0;font-weight:600;word-break:break-word;font-size:12.5px}
+  .frow .fcnt{color:var(--muted);font-size:11px;flex:0 0 auto}
+  .frow .fgroup{flex:0 0 auto;font-size:10px;color:#a7f3d0;background:#0e2119;border:1px solid #1f7a4d;border-radius:6px;padding:2px 7px}
+  .frow .fgroup:hover{background:#123726}
+  .eye{cursor:pointer;font-size:13px;flex:0 0 auto;line-height:1}
+  .eye.off{opacity:.5;filter:grayscale(1)}
+  .sug-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:#12233f;border:1px solid #2f4a75;color:#bcd3f5;border-radius:20px;padding:6px 12px;margin:0 6px 6px 0;cursor:pointer}
+  .sug-chip:hover{background:#17335c}
+  .sug-chip.psd{background:#0e2119;border-color:#1f7a4d;color:#a7f3d0}
+  .sug-chip.psd:hover{background:#123726}
+  .hint{color:var(--muted);font-size:13px;margin:0 0 12px;background:var(--bg2);border-left:3px solid var(--brand);border-radius:0 8px 8px 0;padding:9px 12px}
+  /* inspector (layer dang chon) */
+  .selPanel{background:linear-gradient(180deg,#0d2136,#0b1b2e);border:1px solid var(--sky);border-radius:12px;padding:12px 14px;margin-bottom:14px}
+  .selPanel .t{font-size:14px;font-weight:700;color:#bae6fd;word-break:break-word;display:flex;align-items:center;gap:6px}
+  .selPanel .grpttl{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);margin:12px 0 5px;font-weight:700}
+  .selPanel .r{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:6px}
+  .selPanel input,.selPanel select,.selPanel textarea{padding:6px 8px;background:#0a1526;border:1px solid var(--line);border-radius:7px;color:#e8eeff;font-size:12.5px}
+  .selPanel .num{width:66px}
+  .selPanel button{padding:6px 11px;font-size:12.5px;border-radius:8px}
+  /* tuy chon xuat (accordion) */
+  .acc{border:1px solid var(--line);border-radius:12px;margin-top:16px;overflow:hidden;background:var(--card)}
+  .acc>summary{padding:13px 15px;background:var(--card2);font-weight:700;font-size:14px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px}
+  .acc>summary::-webkit-details-marker{display:none}
+  .acc>summary .arw{margin-left:auto;transition:.2s;color:var(--muted)}
+  .acc[open]>summary .arw{transform:rotate(90deg)}
+  .acc .body{padding:6px 15px 14px}
+  .actionbar{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+  kbd{background:var(--bg2);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-size:11px;font-family:inherit}
 </style></head><body>
 <div class="wrap">
-  <h1>&#127912; psd2html</h1>
-  <p class="sub">Keo file PSD vao &rarr; <b>Phan tich</b> &rarr; <b>chon anh giu/bo</b> &rarr; <b>Xuat web</b>.<br>
-    <b style="color:#93c5fd">Nhieu file = moi file 1 section</b>, ghep doc theo <b>thu tu ten file</b>
-    (vd: 01-hero.psd, 02-features.psd, 03-footer.psd).</p>
+  <h1>&#127912; psd2html <span style="font-size:13px;font-weight:400;color:var(--muted)">— Chuyển PSD sang web</span></h1>
+  <p class="sub">Kéo file PSD vào &rarr; <b>Phân tích</b> &rarr; <b>chỉnh sửa &amp; chọn ảnh</b> &rarr; <b>Xuất web</b>.
+    Nhiều file = mỗi file một section, ghép dọc theo <b>thứ tự tên file</b> (vd: <code>01-hero.psd</code>, <code>02-tinh-nang.psd</code>).</p>
 
-  <!-- BUOC 1: upload -->
+  <div class="steps">
+    <span class="st on" id="stp1"><span class="n">1</span> Tải PSD</span>
+    <span class="sep"></span>
+    <span class="st" id="stp2"><span class="n">2</span> Chỉnh sửa</span>
+    <span class="sep"></span>
+    <span class="st" id="stp3"><span class="n">3</span> Xuất web</span>
+  </div>
+
+  <!-- BƯỚC 1: tải PSD -->
   <div id="step1">
     <div class="grid">
       <div class="drop" id="dropD">
-        <div class="big">&#128196; Keo tha PSD <b>Desktop</b></div>
-        <small>1 file, hoac nhieu file (moi file 1 section)</small>
+        <div class="big">&#128196; Kéo thả PSD <b>Desktop</b></div>
+        <small>1 file, hoặc nhiều file (mỗi file một section)</small>
         <div class="fname" id="nameD"></div>
         <input type="file" id="fileD" accept=".psd" multiple hidden>
       </div>
       <div class="drop" id="dropM">
-        <div class="big">&#128241; Keo tha PSD <b>Mobile</b></div>
-        <small>tuy chon - 1 hoac nhieu file</small>
+        <div class="big">&#128241; Kéo thả PSD <b>Mobile</b></div>
+        <small>tuỳ chọn — 1 hoặc nhiều file</small>
         <div class="fname" id="nameM"></div>
         <input type="file" id="fileM" accept=".psd" multiple hidden>
       </div>
     </div>
     <div class="row">
-      <span style="color:var(--muted);font-size:14px">Chat luong anh:</span>
+      <span class="lbl">Chất lượng ảnh:</span>
       <div class="fmt">
-        <label><input type="radio" name="quality" value="balanced" checked><span>Can bang (WebP)</span></label>
-        <label><input type="radio" name="quality" value="high"><span>Net cao (WebP)</span></label>
-        <label><input type="radio" name="quality" value="png"><span>Anh goc (PNG, nang)</span></label>
+        <label title="WebP nhẹ, cân bằng — khuyên dùng"><input type="radio" name="quality" value="balanced" checked><span>Cân bằng (WebP)</span></label>
+        <label title="WebP nét hơn, nặng hơn chút"><input type="radio" name="quality" value="high"><span>Nét cao (WebP)</span></label>
+        <label title="Ảnh gốc PNG — nét nhất, nặng nhất"><input type="radio" name="quality" value="png"><span>Ảnh gốc (PNG)</span></label>
       </div>
     </div>
     <div class="row">
-      <button id="goParse">&#128269; Phan tich PSD</button>
-      <small style="color:var(--muted)">PSD lon co the mat 1-3 phut de doc.</small>
+      <button id="goParse">&#128269; Phân tích PSD</button>
+      <small style="color:var(--muted)">PSD lớn có thể mất 1–3 phút để đọc.</small>
     </div>
   </div>
 
-  <!-- panel tien trinh parse -->
+  <!-- tiến trình phân tích -->
   <div class="panel" id="parsePanel">
-    <b id="parseStep">Dang xu ly...</b>
+    <b id="parseStep">Đang xử lý…</b>
     <div class="bar"><i></i></div>
     <div id="parseErr" class="err"></div>
   </div>
 
-  <!-- BUOC 2: EDITOR -->
+  <!-- BƯỚC 2: TRÌNH CHỈNH SỬA -->
   <div class="panel" id="editor">
-    <div class="row" style="margin-top:0">
-      <b style="font-size:16px">&#9986;&#65039; Chon anh dua vao web</b>
+    <div class="etool">
+      <span class="title">&#9986;&#65039; Trình chỉnh sửa</span>
       <span class="tabs" id="tabs"></span>
-      <button class="ghost" id="grpMode" style="margin-left:auto">&#129513; Che do gop</button>
-      <span style="color:var(--muted);font-size:13px" id="selInfo"></span>
+      <button id="grpMode" title="Gộp nhiều ảnh thành một (như group trong PSD)">&#129513; Gộp ảnh</button>
+      <span class="spacer"></span>
+      <span class="chip" id="selInfo"></span>
+      <button class="ghost sm" id="goReview" title="Xem trước bản HTML thật theo ảnh đang chọn">&#128065; Xem thử</button>
+      <button class="sm" id="goExport">&#128190; Xuất web</button>
     </div>
-    <p class="hint" id="edHint">Bo tich = khong xuat anh do. Bam tieu de section de bat/tat ca section.
-      Preview ben trai an/hien ngay theo lua chon.</p>
-    <div id="grpBar" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;background:#0b1b2e;border:1px solid #2563eb;border-radius:10px;padding:10px 12px;margin-bottom:12px">
-      <b style="color:#93c5fd" id="grpCount">0 anh chon</b>
-      <input id="grpName" placeholder="Ten group (vd Background)" style="flex:1;min-width:160px;padding:7px 10px;background:#0f172a;border:1px solid var(--line);border-radius:7px;color:#e8eeff">
-      <button id="grpDo">&#129513; Gop thanh 1 anh</button>
-      <button class="ghost" id="grpClear">Bo chon</button>
+    <p class="hint" id="edHint">Bấm vào ảnh (trên khung xem trước hoặc trong danh sách) để <b>chọn</b> &rarr; kéo để di chuyển,
+      kéo góc để đổi kích thước, phím <kbd>← ↑ ↓ →</kbd> để nhích. Bỏ tích = không xuất ảnh đó.</p>
+
+    <!-- Tuỳ chọn xuất (đưa lên đầu để chọn định dạng trước) -->
+    <details class="acc" id="exportAcc" style="margin-top:0;margin-bottom:14px">
+      <summary>&#9881;&#65039; Tuỳ chọn xuất web <span style="color:var(--muted);font-weight:400;font-size:12.5px">— định dạng, ngôn ngữ, swiper…</span> <span class="arw">&#9656;</span></summary>
+      <div class="body">
+        <div class="row" style="margin-top:10px">
+          <span class="lbl">Định dạng:</span>
+          <div class="fmt">
+            <label title="HTML tĩnh — xem ngay, không cần cài đặt"><input type="radio" name="fmt" value="slices" checked><span>HTML (xem ngay)</span></label>
+            <label title="Dự án React + Tailwind"><input type="radio" name="fmt" value="react"><span>React + Tailwind</span></label>
+            <label title="Dự án Next.js"><input type="radio" name="fmt" value="next"><span>Next.js</span></label>
+          </div>
+        </div>
+        <div class="row" id="langRow" style="display:none">
+          <span class="lbl">Ngôn ngữ:</span>
+          <div class="fmt">
+            <label><input type="radio" name="lang" value="js" checked><span>JavaScript</span></label>
+            <label><input type="radio" name="lang" value="ts"><span>TypeScript</span></label>
+          </div>
+        </div>
+        <div class="row">
+          <label class="fmt" style="cursor:pointer"><input type="checkbox" id="swiper" style="margin-right:6px">
+            <span>Full-page (swiper): lăn/vuốt snap từng section</span></label>
+        </div>
+        <div id="reactOpts" style="display:none">
+          <div class="lbl" style="margin:6px 0 8px">Tuỳ chọn React/Next (bám prod):</div>
+          <div class="fmt" style="flex-direction:column;gap:9px;align-items:flex-start">
+            <label style="cursor:pointer"><input type="checkbox" id="swiper_lib" style="margin-right:6px"><span>Dùng Swiper.js thật (hiệu ứng fade như prod)</span></label>
+            <label style="cursor:pointer"><input type="checkbox" id="env_config" style="margin-right:6px"><span>Cấu hình link/API bằng <code>.env</code> (VITE_APP_*)</span></label>
+            <label style="cursor:pointer"><input type="checkbox" id="nav_menu" style="margin-right:6px"><span>Nav chữ + slideTo (cấu hình được)</span></label>
+            <label style="cursor:pointer"><input type="checkbox" id="popups" style="margin-right:6px"><span>Popup mẫu (đăng nhập / thể lệ / lịch sử / nạp đầu)</span></label>
+            <label style="cursor:pointer"><input type="checkbox" id="fluid" style="margin-right:6px"><span>&#128241; Mobile co giãn thật (section xếp dọc, lưới reflow 4&rarr;2&rarr;1 cột) — không dùng khi đã có PSD mobile</span></label>
+            <label style="cursor:pointer"><input type="checkbox" id="ai_enhance" style="margin-right:6px"><span>&#10024; AI prod-hoá (chữ thật + hover) — cần API key trong <code>.env</code></span></label>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <div id="grpBar" style="display:none">
+      <div class="selPanel" style="border-color:var(--grp);margin-bottom:12px">
+        <div class="r" style="margin-top:0">
+          <b style="color:#7ee2b8" id="grpCount">0 ảnh đã chọn</b>
+          <input id="grpName" placeholder="Tên nhóm (vd: Nền, Nhân vật)" style="flex:1;min-width:150px">
+          <button class="sm" id="grpDo">&#129513; Gộp thành 1 ảnh</button>
+          <button class="ghost sm" id="grpClear">Bỏ chọn</button>
+        </div>
+      </div>
     </div>
     <div id="grpSug" style="margin-bottom:12px"></div>
+    <div class="selPanel" id="selPanel" style="display:none"></div>
+
     <div class="ed">
-      <div class="prevBox"><div class="stage" id="stage"></div></div>
-      <div id="secList"></div>
+      <div class="prevBox">
+        <div class="secNav" id="secNav"></div>
+        <div class="pvtop">
+          <span>Nhấp để chọn &middot; kéo để chỉnh</span>
+          <span class="zoom"><button id="zOut" title="Thu nhỏ">&minus;</button><b id="zLbl">100%</b><button id="zIn" title="Phóng to">+</button></span>
+        </div>
+        <div class="stageClip" id="stageClip"><div class="stage" id="stage"></div></div>
+      </div>
+      <div>
+        <div class="listhead">
+          <div class="search">&#128269;<input id="layerSearch" placeholder="Tìm ảnh theo tên…" autocomplete="off"></div>
+        </div>
+        <div id="secList"></div>
+      </div>
     </div>
 
-    <hr style="border-color:var(--line);margin:18px 0">
-    <!-- BUOC 3: format + option -->
-    <div class="row" style="margin-top:0">
-      <div class="fmt">
-        <label><input type="radio" name="fmt" value="slices" checked><span>HTML (xem ngay)</span></label>
-        <label><input type="radio" name="fmt" value="react"><span>React + Tailwind</span></label>
-        <label><input type="radio" name="fmt" value="next"><span>Next.js</span></label>
-      </div>
+    <div class="actionbar">
+      <button class="ghost" id="restart">&#8617; Phân tích file khác</button>
+      <span style="flex:1"></span>
+      <span class="chip">💡 Chỉnh xong bấm <b>Xuất web</b> (góc trên)</span>
     </div>
-    <div class="row" id="langRow" style="display:none">
-      <span style="color:var(--muted);font-size:14px">Ngon ngu:</span>
-      <div class="fmt">
-        <label><input type="radio" name="lang" value="js" checked><span>JavaScript</span></label>
-        <label><input type="radio" name="lang" value="ts"><span>TypeScript</span></label>
-      </div>
-    </div>
-    <div class="row">
-      <label class="fmt" style="cursor:pointer"><input type="checkbox" id="swiper" style="margin-right:6px">
-        <span>Full-page (swiper): lan/vuot snap tung section</span></label>
-    </div>
-    <div id="reactOpts" style="display:none;margin:6px 0 4px">
-      <div style="color:var(--muted);font-size:13px;margin-bottom:6px">Tuy chon React/Next (bam prod):</div>
-      <div class="fmt" style="flex-direction:column;gap:8px;align-items:flex-start">
-        <label style="cursor:pointer"><input type="checkbox" id="swiper_lib" style="margin-right:6px"><span>Dung Swiper.js that (effect fade nhu prod)</span></label>
-        <label style="cursor:pointer"><input type="checkbox" id="env_config" style="margin-right:6px"><span>Config link/API bang .env (VITE_APP_*)</span></label>
-        <label style="cursor:pointer"><input type="checkbox" id="nav_menu" style="margin-right:6px"><span>Nav chu + slideTo (config duoc)</span></label>
-        <label style="cursor:pointer"><input type="checkbox" id="popups" style="margin-right:6px"><span>Popup stubs (login/the le/lich su/nap dau)</span></label>
-        <label style="cursor:pointer"><input type="checkbox" id="fluid" style="margin-right:6px"><span>&#128241; Mobile co gian that (section xep doc, luoi reflow 4&rarr;2&rarr;1 cot) - khong dung khi da co PSD mobile</span></label>
-        <label style="cursor:pointer"><input type="checkbox" id="ai_enhance" style="margin-right:6px"><span>&#10024; AI prod-hoa (chu that + hover) - can API key trong .env</span></label>
-      </div>
-    </div>
-    <div class="row">
-      <button id="goExport">&#128190; Xuat web</button>
-      <button class="ghost" id="goReview">&#128065; Xem thu web</button>
-      <button class="ghost" id="restart">&#8617; Phan tich file khac</button>
-    </div>
+
     <div id="reviewBox" style="display:none;margin-top:6px">
       <div class="row" style="margin:0 0 6px">
-        <b id="reviewStep" style="font-size:14px">Dang dung ban xem thu...</b>
-        <span style="color:var(--muted);font-size:12px">Ban HTML thuc te theo anh dang chon (chua tinh responsive React/Next).</span>
-        <button class="ghost" id="reviewOpen" style="margin-left:auto;padding:6px 12px;font-size:13px;display:none">&#8599; Mo tab moi</button>
+        <b id="reviewStep" style="font-size:14px">Đang dựng bản xem thử…</b>
+        <span style="color:var(--muted);font-size:12px">Bản HTML thật theo ảnh đang chọn (chưa tính responsive của React/Next).</span>
+        <button class="ghost sm" id="reviewOpen" style="margin-left:auto;display:none">&#8599; Mở tab mới</button>
       </div>
       <div class="bar" id="reviewBar"><i></i></div>
       <iframe id="reviewFrame" style="display:none;height:640px"></iframe>
@@ -819,10 +1122,10 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
 
-  <!-- panel export + ket qua -->
+  <!-- tiến trình xuất + kết quả -->
   <div class="panel" id="exportPanel">
     <div id="exProgress">
-      <b id="exStep">Dang xuat...</b>
+      <b id="exStep">Đang xuất…</b>
       <div class="bar"><i></i></div>
     </div>
     <div id="result" style="display:none"></div>
@@ -834,6 +1137,13 @@ let JOB=null, MAN=null, curTab='desktop';
 const disabled={desktop:new Set(), mobile:new Set()};
 let groupMode=false;
 const groupSel={desktop:new Set(), mobile:new Set()};
+const collapsed={desktop:new Set(), mobile:new Set()};   // folder dang gap trong cay layer
+let sel=null, curScale=1;   // layer dang chon (thao tac canvas) + he so scale preview
+let layerQuery="";          // tu khoa tim trong danh sach layer
+let curSec=-1;              // section dang xem rieng (-1 = tat ca)
+let previewZoom=1;          // he so phong khung xem truoc (1 = vua be rong cot)
+function setStep(n){ [1,2,3].forEach(i=>{ const e=document.getElementById("stp"+i);
+  e.classList.toggle("on", i===n); e.classList.toggle("done", i<n); }); }
 
 function showList(nameEl, arr){
   if(!arr.length){ nameEl.innerHTML=""; return; }
@@ -859,7 +1169,18 @@ document.querySelectorAll('input[name=fmt]').forEach(r=>r.addEventListener('chan
   const isRN=(f==='react'||f==='next');
   document.getElementById('langRow').style.display=isRN?'flex':'none';
   document.getElementById('reactOpts').style.display=isRN?'block':'none';
+  if(isRN) document.getElementById('exportAcc').open=true;   // mo tuy chon de thay
 }));
+// tim kiem layer trong danh sach
+document.getElementById('layerSearch').addEventListener('input',function(e){
+  layerQuery=(e.target.value||'').trim().toLowerCase(); render(); });
+// zoom khung xem truoc
+document.getElementById('zIn').onclick=()=>{ previewZoom=Math.min(3, previewZoom+0.25); render(); };
+document.getElementById('zOut').onclick=()=>{ previewZoom=Math.max(0.5, previewZoom-0.25); render(); };
+// doi be rong cua so -> ve lai khung cho vua cot
+let _rzT=null; window.addEventListener('resize',()=>{
+  if(!document.getElementById('editor').classList.contains('show')) return;
+  clearTimeout(_rzT); _rzT=setTimeout(render,150); });
 
 const parsePanel=document.getElementById("parsePanel"), parseStep=document.getElementById("parseStep"),
       parseErr=document.getElementById("parseErr"), editor=document.getElementById("editor"),
@@ -869,13 +1190,13 @@ const parsePanel=document.getElementById("parsePanel"), parseStep=document.getEl
 
 // ---- BUOC 1: parse ----
 goParse.onclick=async()=>{
-  if(!filesD.length){ alert("Hay chon file PSD desktop truoc"); return; }
+  if(!filesD.length){ alert("Hãy chọn file PSD Desktop trước"); return; }
   const fd=new FormData();
   filesD.forEach(f=>fd.append("desktop",f));
   filesM.forEach(f=>fd.append("mobile",f));
   fd.append("quality",(document.querySelector('input[name=quality]:checked')||{}).value||'balanced');
   goParse.disabled=true; parsePanel.classList.add("show"); parseErr.textContent="";
-  editor.classList.remove("show"); parseStep.textContent="Tai file len...";
+  editor.classList.remove("show"); parseStep.textContent="Đang tải file lên…";
   let r;
   try{
     const resp=await fetch("/parse",{method:"POST",body:fd});
@@ -892,7 +1213,7 @@ goParse.onclick=async()=>{
 async function pollParse(){
   let s; try{ s=await (await fetch("/status/"+JOB)).json(); }
   catch(e){ setTimeout(pollParse,1500); return; }
-  parseStep.textContent=s.step||"Dang xu ly...";
+  parseStep.textContent=s.step||"Đang xử lý…";
   if(s.status==="done" && s.manifest){ MAN=s.manifest; goParse.disabled=false;
     parsePanel.classList.remove("show"); openEditor(); return; }
   if(s.status==="error"){ parseErr.textContent=(s.error||"")+"\\n"+(s.trace||""); goParse.disabled=false; return; }
@@ -904,16 +1225,17 @@ function openEditor(){
   document.getElementById("step1").style.display="none";
   disabled.desktop.clear(); disabled.mobile.clear();
   groupSel.desktop.clear(); groupSel.mobile.clear();
-  groupMode=false; document.getElementById("grpMode").classList.remove("active");
+  collapsed.desktop.clear(); collapsed.mobile.clear();
+  groupMode=false; sel=null; curSec=-1; layerQuery=""; previewZoom=1; document.getElementById("grpMode").classList.remove("active");
   curTab='desktop';
   const tabs=document.getElementById("tabs");
   tabs.innerHTML="";
   if(MAN.mobile){
     ["desktop","mobile"].forEach(t=>{ const b=document.createElement("button");
       b.textContent=t==='desktop'?'\\u{1F4BB} Desktop':'\\u{1F4F1} Mobile';
-      b.className=t===curTab?'active':''; b.onclick=()=>{curTab=t; groupSel[t].clear(); render();}; tabs.appendChild(b); });
+      b.className=t===curTab?'active':''; b.onclick=()=>{curTab=t; groupSel[t].clear(); sel=null; curSec=-1; render();}; tabs.appendChild(b); });
   }
-  editor.classList.add("show"); render();
+  editor.classList.add("show"); setStep(2); render();
 }
 
 function variant(){ return MAN[curTab]; }
@@ -921,99 +1243,353 @@ function variant(){ return MAN[curTab]; }
 function render(){
   document.querySelectorAll('#tabs button').forEach((b,i)=>b.className=(['desktop','mobile'][i]===curTab)?'active':'');
   const v=variant(), dis=disabled[curTab];
+  if(sel && !v.layers.some(l=>l.id===sel)) sel=null;   // sel khong con -> bo
+  v.layers.sort((a,b)=>(a.z||0)-(b.z||0));              // thu tu lop (z), stable
   // preview stage
   const stage=document.getElementById("stage");
-  const maxW=380, scale=Math.min(1, maxW/v.canvas.width);
+  const box=document.querySelector('.prevBox');
+  const avail=box?Math.max(280, box.clientWidth-26):380;   // be rong kha dung cua cot preview
+  const fit=Math.min(1, avail/v.canvas.width);
+  curScale=Math.min(1, fit*previewZoom);
+  const scale=curScale;
+  const zl=document.getElementById('zLbl'); if(zl) zl.textContent=Math.round(previewZoom*100)+'%';
   stage.style.width=(v.canvas.width*scale)+"px";
   stage.style.height=(v.canvas.height*scale)+"px";
   let html="";
-  v.layers.forEach(l=>{ const b=l.bbox, off=dis.has(l.id)?" off":"";
-    html+='<img class="lyr'+off+'" data-id="'+l.id+'" src="'+l.asset+'" loading="lazy" style="left:'+(b.x*scale)+'px;top:'+(b.y*scale)+'px;width:'+(b.width*scale)+'px;height:'+(b.height*scale)+'px">';
+  v.layers.forEach(l=>{ const b=l.bbox, off=dis.has(l.id)?" off":"", ss=(sel===l.id)?" sel":"";
+    const st='left:'+(b.x*scale)+'px;top:'+(b.y*scale)+'px;width:'+(b.width*scale)+'px;height:'+(b.height*scale)+'px';
+    const td=l.textData;
+    if(td && td.asText){   // chu that -> hien text ngay trong preview (WYSIWYG)
+      html+='<div class="lyr txt'+off+ss+'" data-id="'+l.id+'" style="'+st
+        +';display:flex;align-items:center;justify-content:center;text-align:center;overflow:hidden'
+        +';font-weight:700;line-height:1.15;white-space:pre-wrap;font-size:'+((td.size||20)*scale)+'px;color:'+(td.color||'#fff')+'">'+esc(td.content||'')+'</div>';
+    }else{
+      html+='<img class="lyr'+off+ss+'" data-id="'+l.id+'" src="'+l.asset+'" loading="lazy" style="'+st+'">';
+    }
   });
   v.sections.forEach((s,i)=>{ if(i===0)return;
     html+='<div class="secmark" style="top:'+(s.y0*scale)+'px"><span>'+esc(s.name)+'</span></div>'; });
   stage.innerHTML=html;
+  drawSel();
+  // xem riêng 1 section: cắt khung theo chiều cao section + dịch stage lên
+  const clip=document.getElementById("stageClip");
+  clip.style.width=(v.canvas.width*scale)+"px";
+  if(curSec>=0 && v.sections[curSec]){
+    const sc=v.sections[curSec];
+    clip.style.height=((sc.y1-sc.y0)*scale)+"px";
+    stage.style.transform="translateY("+(-sc.y0*scale)+"px)";
+  }else{
+    clip.style.height=(v.canvas.height*scale)+"px";
+    stage.style.transform="none";
+  }
+  renderSecNav();
 
-  // list nhom theo section
-  const gsel=groupSel[curTab];
+  renderList();
+  renderSug(); updGrpBar(); updInfo();
+  if(sel && !groupMode) ensurePanel(); else document.getElementById("selPanel").style.display="none";
+}
+
+// ================= CÂY LAYER kiểu Photoshop (folder lồng nhau + ẩn/hiện) =================
+function renderList(){
+  const v=variant(), dis=disabled[curTab], gsel=groupSel[curTab], col=collapsed[curTab];
   const list=document.getElementById("secList"); list.innerHTML="";
   list.classList.toggle("gmode", groupMode);
-  v.sections.forEach((s,si)=>{
-    const layers=v.layers.filter(l=>l.section===si);
-    if(!layers.length) return;
-    const sec=document.createElement("div"); sec.className="sec";
-    const kept=layers.filter(l=>!dis.has(l.id)).length;
-    const h=document.createElement("h4");
-    h.innerHTML='<span>'+esc(s.name)+'</span><span class="cnt">'+kept+'/'+layers.length+' anh</span>'
-      +'<span class="toggle">bat/tat het</span>';
-    h.querySelector('.toggle').onclick=(e)=>{ e.stopPropagation();
-      const allOn=layers.every(l=>!dis.has(l.id));
-      layers.forEach(l=>{ if(allOn) dis.add(l.id); else dis.delete(l.id); });
-      render(); };
-    sec.appendChild(h);
-    const box=document.createElement("div"); box.className="layers";
-    layers.forEach(l=>{
-      const on=!dis.has(l.id);
-      const it=document.createElement("div");
-      it.className="item"+(on?"":" off")+(l.group?" grp":"")+(gsel.has(l.id)?" gsel":"");
-      it.innerHTML='<input type="checkbox" '+(on?"checked":"")+(groupMode?' disabled':'')+'>'
-        +'<img class="th" src="'+l.asset+'" loading="lazy">'
-        +'<span class="nm">'+esc(l.name)
-          +(l.text?'<span class="badge">T</span>':'')
-          +(l.group?'<span class="gbadge">gop '+l.count+'</span>':'')+'</span>'
-        +(l.group?'<span class="untie" title="Tach group">&#9986; tach</span>':'');
-      const cb=it.querySelector('input');
-      cb.onclick=(e)=>{ e.stopPropagation();
-        if(e.target.checked) dis.delete(l.id); else dis.add(l.id);
-        it.classList.toggle("off",!e.target.checked);
-        const im=stage.querySelector('img[data-id="'+cssq(l.id)+'"]'); if(im) im.classList.toggle("off",!e.target.checked);
-        updInfo(); h.querySelector('.cnt').textContent=layers.filter(x=>!dis.has(x.id)).length+'/'+layers.length+' anh'; };
-      const untie=it.querySelector('.untie');
-      if(untie) untie.onclick=(e)=>{ e.stopPropagation(); doUngroup(l.id); };
-      it.onclick=()=>{ if(!groupMode) return;
-        if(gsel.has(l.id)) gsel.delete(l.id); else gsel.add(l.id);
-        it.classList.toggle("gsel", gsel.has(l.id)); updGrpBar(); };
-      box.appendChild(it);
-    });
-    sec.appendChild(box); list.appendChild(sec);
-  });
-  renderSug(); updGrpBar(); updInfo();
+
+  // Chế độ tìm kiếm: danh sách phẳng các ảnh khớp tên
+  if(layerQuery){
+    const wrap=document.createElement("div"); wrap.className="tree";
+    v.layers.filter(l=>(l.name||'').toLowerCase().includes(layerQuery) && (curSec<0||l.section===curSec))
+      .forEach(l=>wrap.appendChild(leafRow(l,0)));
+    if(!wrap.children.length) wrap.innerHTML='<div class="hint" style="margin:0">Không tìm thấy ảnh nào.</div>';
+    list.appendChild(wrap); return;
+  }
+
+  // Dựng cây theo folder PSD (parent -> con)
+  const kids={};
+  const add=(p,it)=>{ (kids[p||"__root"]=kids[p||"__root"]||[]).push(it); };
+  (v.nodes||[]).forEach(g=>add(g.parent,{t:"g",n:g}));
+  v.layers.forEach(l=>add(l.parent,{t:"l",n:l}));
+  // sắp đúng thứ tự PSD: order lớn = lớp TRÊN (front) -> hiện trước; xen kẽ folder/layer đúng vị trí
+  Object.keys(kids).forEach(k=>kids[k].sort((a,b)=>(b.n.order||0)-(a.n.order||0)));
+  // gom id anh (là con-cháu) dưới 1 folder
+  function leavesOf(gid){ let out=[]; (kids[gid]||[]).forEach(it=>{
+    if(it.t==="g") out=out.concat(leavesOf(it.n.id)); else out.push(it.n); }); return out; }
+
+  const wrap=document.createElement("div"); wrap.className="tree";
+  (kids["__root"]||[]).forEach(it=>renderNode(it,wrap,0));
+  list.appendChild(wrap);
+
+  function renderNode(it,parentEl,depth){
+    if(it.t==="l"){ const l=it.n;
+      if(curSec>=0 && l.section!==curSec) return;
+      parentEl.appendChild(leafRow(l,depth)); return; }
+    // folder
+    const g=it.n, leaves=leavesOf(g.id).filter(l=>curSec<0||l.section===curSec);
+    if(!leaves.length) return;                        // ẩn folder rỗng / ngoài section
+    const kept=leaves.filter(l=>!dis.has(l.id)).length;
+    const open=!col.has(g.id);
+    const row=document.createElement("div"); row.className="frow"; row.style.paddingLeft=(6+depth*15)+"px";
+    row.innerHTML='<span class="tw">'+(open?'&#9662;':'&#9656;')+'</span>'
+      +'<span class="eye'+(kept?'':' off')+'" title="Ẩn/hiện cả nhóm">'+(kept?'&#128065;':'&#128584;')+'</span>'
+      +'<span class="fico">&#128193;</span><span class="fname">'+esc(g.name)+'</span>'
+      +'<span class="fcnt">'+kept+'/'+leaves.length+'</span>'
+      +(leaves.length>=2&&!groupMode?'<span class="fgroup" title="Gộp cả folder thành 1 ảnh">&#129513; gộp</span>':'');
+    row.querySelector('.tw').onclick=(e)=>{ e.stopPropagation();
+      if(col.has(g.id)) col.delete(g.id); else col.add(g.id); renderList(); };
+    row.querySelector('.eye').onclick=(e)=>{ e.stopPropagation();
+      const allOn=leaves.every(l=>!dis.has(l.id));
+      leaves.forEach(l=>{ if(allOn) dis.add(l.id); else dis.delete(l.id); });
+      applyVis(); renderList(); updInfo(); };
+    const fg=row.querySelector('.fgroup'); if(fg) fg.onclick=(e)=>{ e.stopPropagation();
+      doGroup(leaves.map(l=>l.id), g.name); };
+    row.onclick=()=>{ if(col.has(g.id)) col.delete(g.id); else col.add(g.id); renderList(); };
+    parentEl.appendChild(row);
+    if(open){ const childBox=document.createElement("div");
+      (kids[g.id]||[]).forEach(c=>renderNode(c,childBox,depth+1)); parentEl.appendChild(childBox); }
+  }
 }
+function leafRow(l,depth){
+  const dis=disabled[curTab], gsel=groupSel[curTab], on=!dis.has(l.id);
+  const it=document.createElement("div"); it.dataset.id=l.id;
+  it.className="item lrow"+(on?"":" off")+(l.group?" grp":"")+(gsel.has(l.id)?" gsel":"")+(sel===l.id?" sel":"");
+  it.style.paddingLeft=(6+depth*15)+"px";
+  it.innerHTML='<span class="eye'+(on?'':' off')+'" title="Ẩn/hiện ảnh">'+(on?'&#128065;':'&#128584;')+'</span>'
+    +'<img class="th" src="'+l.asset+'" loading="lazy">'
+    +'<span class="nm">'+esc(l.name)
+      +(l.text?'<span class="badge">T</span>':'')
+      +(l.group?'<span class="gbadge">gộp '+l.count+'</span>':'')+'</span>'
+    +(l.group?'<span class="untie" title="Tách nhóm">&#9986; tách</span>':'');
+  it.querySelector('.eye').onclick=(e)=>{ e.stopPropagation();
+    if(dis.has(l.id)) dis.delete(l.id); else dis.add(l.id);
+    const off=dis.has(l.id); it.classList.toggle("off",off);
+    it.querySelector('.eye').classList.toggle("off",off);
+    it.querySelector('.eye').innerHTML=off?'&#128584;':'&#128065;';
+    const im=document.querySelector('#stage .lyr[data-id="'+cssq(l.id)+'"]'); if(im) im.classList.toggle("off",off);
+    updInfo(); };
+  const untie=it.querySelector('.untie');
+  if(untie) untie.onclick=(e)=>{ e.stopPropagation(); doUngroup(l.id); };
+  it.onclick=()=>{ if(groupMode){
+      if(gsel.has(l.id)) gsel.delete(l.id); else gsel.add(l.id);
+      it.classList.toggle("gsel", gsel.has(l.id)); updGrpBar(); return; }
+    selectLayer(l.id, true); };
+  return it;
+}
+// đồng bộ ẩn/hiện lên preview (sau khi bật/tắt cả folder)
+function applyVis(){ const dis=disabled[curTab];
+  document.querySelectorAll('#stage .lyr').forEach(im=>{
+    im.classList.toggle('off', dis.has(im.dataset.id)); }); }
 // goi y nhom gop (cung ten chuan hoa) + group hien co
 function renderSug(){
   const box=document.getElementById("grpSug"); const v=variant();
   if(!groupMode){ box.innerHTML=""; return; }
-  let h='';
+  const secName=i=>(v.sections[i]||{}).name||('S'+(i+1));
+  const pg=(v.psdGroups||[]);
   const sug=(v.suggestions||[]).filter(s=>s.members.length>=2);
-  if(sug.length){ h+='<div style="color:var(--muted);font-size:12px;margin-bottom:6px">Goi y gop (cung section + ten) - bam de gop:</div>';
-    sug.forEach((s,i)=>{ const sn=(v.sections[s.section]||{}).name||('S'+(s.section+1));
-      h+='<span class="sug-chip" data-si="'+i+'">&#129513; '+esc(s.name||'nhom')+' &middot; '+s.members.length+' anh <span style="opacity:.6">('+esc(sn)+')</span></span>'; }); }
-  else h='<div style="color:var(--muted);font-size:12px">Khong co goi y (khong co anh cung ten). Chon tay tren danh sach.</div>';
+  let h='';
+  if(pg.length){
+    h+='<div style="color:var(--muted);font-size:12px;margin-bottom:6px">&#128193; Group có sẵn trong PSD — bấm để gộp nguyên folder thành 1 ảnh:</div>';
+    pg.forEach((g,i)=>{ h+='<span class="sug-chip psd" data-src="psd" data-i="'+i+'">&#128193; '+esc(g.name)
+      +' &middot; '+g.n+' ảnh <span style="opacity:.6">('+esc(secName(g.section))+')</span></span>'; });
+  }
+  if(sug.length){
+    h+='<div style="color:var(--muted);font-size:12px;margin:'+(pg.length?'9px':'0')+' 0 6px">&#129513; Gợi ý theo tên (ảnh trùng tên cùng section):</div>';
+    sug.forEach((s,i)=>{ h+='<span class="sug-chip" data-src="name" data-i="'+i+'">&#129513; '+esc(s.name||'nhóm')
+      +' &middot; '+s.members.length+' ảnh <span style="opacity:.6">('+esc(secName(s.section))+')</span></span>'; });
+  }
+  if(!h) h='<div style="color:var(--muted);font-size:12px">Không có group PSD / gợi ý sẵn. Bấm chọn ảnh trong danh sách rồi bấm "Gộp thành 1 ảnh".</div>';
   box.innerHTML=h;
   box.querySelectorAll('.sug-chip').forEach(c=>{ c.onclick=()=>{
-    const s=sug[+c.dataset.si]; doGroup(s.members, s.name); }; });
+    const g = c.dataset.src==='psd' ? v.psdGroups[+c.dataset.i] : sug[+c.dataset.i];
+    if(g) doGroup(g.members, g.name); }; });
 }
 function updGrpBar(){
   const bar=document.getElementById("grpBar"); const gsel=groupSel[curTab];
   bar.style.display=groupMode?"flex":"none";
-  document.getElementById("grpCount").textContent=gsel.size+" anh chon";
+  document.getElementById("grpCount").textContent=gsel.size+" ảnh đã chọn";
 }
 function updInfo(){
   const v=variant(), dis=disabled[curTab], tot=v.layers.length, kept=tot-[...dis].filter(id=>v.layers.some(l=>l.id===id)).length;
-  document.getElementById("selInfo").textContent="Giu "+kept+"/"+tot+" anh";
+  document.getElementById("selInfo").textContent="Giữ "+kept+"/"+tot+" ảnh";
 }
-function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function cssq(s){ return (s||"").replace(/"/g,'\\\\"'); }
+function renderSecNav(){
+  const nav=document.getElementById("secNav"); const v=variant();
+  if(!v.sections || v.sections.length<=1){ nav.innerHTML=""; return; }
+  let h='<button data-s="-1"'+(curSec<0?' class="active"':'')+'>&#128196; Tất cả</button>';
+  v.sections.forEach((s,i)=>{ h+='<button data-s="'+i+'"'+(curSec===i?' class="active"':'')
+    +'>'+(i+1)+'. '+esc(s.name||('Section '+(i+1)))+'</button>'; });
+  nav.innerHTML=h;
+  nav.querySelectorAll('button').forEach(b=>b.onclick=()=>{ curSec=+b.dataset.s; render(); });
+}
+
+// ================= THAO TAC CANVAS: chon / keo / resize / z-order / nudge =================
+function curLayer(){ return sel ? variant().layers.find(l=>l.id===sel) : null; }
+function positionImg(l){
+  const im=document.querySelector('#stage .lyr[data-id="'+cssq(l.id)+'"]');
+  if(im){ const b=l.bbox; im.style.left=(b.x*curScale)+'px'; im.style.top=(b.y*curScale)+'px';
+    im.style.width=(b.width*curScale)+'px'; im.style.height=(b.height*curScale)+'px';
+    if(im.classList.contains('txt') && l.textData) im.style.fontSize=((l.textData.size||20)*curScale)+'px'; }
+}
+function selectLayer(id, scrollList){
+  if(groupMode) return;
+  sel=id;
+  document.querySelectorAll('#stage .lyr.sel').forEach(i=>i.classList.remove('sel'));
+  const im=document.querySelector('#stage .lyr[data-id="'+cssq(id)+'"]'); if(im) im.classList.add('sel');
+  document.querySelectorAll('.item.sel').forEach(i=>i.classList.remove('sel'));
+  const it=document.querySelector('.item[data-id="'+cssq(id)+'"]');
+  if(it){ it.classList.add('sel'); if(scrollList) it.scrollIntoView({block:'nearest'}); }
+  drawSel(); ensurePanel();
+}
+function deselect(){ sel=null;
+  const ov=document.querySelector('#stage .selov'); if(ov) ov.remove();
+  document.querySelectorAll('.item.sel,#stage .lyr.sel').forEach(i=>i.classList.remove('sel'));
+  document.getElementById('selPanel').style.display='none'; }
+function drawSel(){
+  const stage=document.getElementById('stage'); const old=stage.querySelector('.selov'); if(old) old.remove();
+  const l=curLayer(); if(groupMode || !l || disabled[curTab].has(l.id)) return;
+  const b=l.bbox;
+  const ov=document.createElement('div'); ov.className='selov';
+  ov.style.left=(b.x*curScale)+'px'; ov.style.top=(b.y*curScale)+'px';
+  ov.style.width=(b.width*curScale)+'px'; ov.style.height=(b.height*curScale)+'px';
+  ov.innerHTML='<div class="mv"></div>'+['nw','n','ne','e','se','s','sw','w']
+    .map(d=>'<div class="hnd '+d+'" data-d="'+d+'"></div>').join('');
+  stage.appendChild(ov);
+  ov.querySelector('.mv').addEventListener('pointerdown',e=>{e.stopPropagation(); startDrag(e,'move');});
+  ov.querySelectorAll('.hnd').forEach(h=>h.addEventListener('pointerdown',
+    e=>{e.stopPropagation(); startDrag(e,h.dataset.d);}));
+}
+function startDrag(e, mode){
+  e.preventDefault(); const l=curLayer(); if(!l) return;
+  const s={x:e.clientX,y:e.clientY, bx:l.bbox.x,by:l.bbox.y,bw:l.bbox.width,bh:l.bbox.height};
+  function mv(ev){
+    const dx=(ev.clientX-s.x)/curScale, dy=(ev.clientY-s.y)/curScale;
+    let bx=s.bx,by=s.by,bw=s.bw,bh=s.bh;
+    if(mode==='move'){ bx=s.bx+dx; by=s.by+dy; }
+    else{
+      if(mode.indexOf('e')>=0) bw=Math.max(4,s.bw+dx);
+      if(mode.indexOf('s')>=0) bh=Math.max(4,s.bh+dy);
+      if(mode.indexOf('w')>=0){ bw=Math.max(4,s.bw-dx); bx=s.bx+(s.bw-bw); }
+      if(mode.indexOf('n')>=0){ bh=Math.max(4,s.bh-dy); by=s.by+(s.bh-bh); }
+    }
+    l.bbox.x=Math.round(bx); l.bbox.y=Math.round(by); l.bbox.width=Math.round(bw); l.bbox.height=Math.round(bh);
+    positionImg(l); drawSel(); syncNums();
+  }
+  function up(){ document.removeEventListener('pointermove',mv); document.removeEventListener('pointerup',up);
+    recomputeSection(l); saveEdit(l.id,{bbox:l.bbox}); }
+  document.addEventListener('pointermove',mv); document.addEventListener('pointerup',up);
+}
+function recomputeSection(l){
+  const v=variant(), cy=l.bbox.y+l.bbox.height/2, S=v.sections; let si=0;
+  S.forEach((s,i)=>{ if(s.y0<=cy && cy<s.y1) si=i; });
+  if(cy>=S[S.length-1].y1) si=S.length-1;
+  l.section=si;
+}
+function bringFront(){ const l=curLayer(); if(!l) return;
+  l.z=Math.max(0,...variant().layers.map(x=>x.z||0))+1; saveEdit(l.id,{z:l.z}); render(); selectLayer(l.id); }
+function sendBack(){ const l=curLayer(); if(!l) return;
+  l.z=Math.min(0,...variant().layers.map(x=>x.z||0))-1; saveEdit(l.id,{z:l.z}); render(); selectLayer(l.id); }
+const LINK_ACTIONS=[['','(khong)'],['download','Tai game'],['login','Dang nhap'],['register','Dang ky'],
+  ['topup','Nap'],['gift','Nhan qua'],['rules','The le'],['history','Lich su'],['social','Facebook'],
+  ['check','Kiem tra'],['custom','Link tuy chinh']];
+function inp(id,val,ph,st){ return '<input id="'+id+'" value="'+esc(val||'')+'"'+(ph?' placeholder="'+ph+'"':'')
+  +' style="'+(st||'')+'">'; }
+function ensurePanel(){
+  const l=curLayer(); const p=document.getElementById('selPanel');
+  if(!l){ p.style.display='none'; return; }
+  p.style.display='block';
+  const lk=l.link||{}, td=l.textData;
+  let h='<div class="t">&#9995; '+esc(l.name)+(l.group?' <span class="gbadge">gộp '+l.count+'</span>':'')
+      +(td?' <span class="badge">T</span>':'')+'</div>'
+   +'<div class="grpttl">Vị trí &amp; kích thước</div>'
+   +'<div class="r">X<input class="num" id="sX">Y<input class="num" id="sY">'
+   +'Rộng<input class="num" id="sW">Cao<input class="num" id="sH"></div>'
+   +'<div class="r"><button class="sm" id="sFront">&#8593; Lên trên cùng</button>'
+   +'<button class="sm ghost" id="sBack">&#8595; Xuống dưới cùng</button>'
+   +'<button class="ghost sm" id="sDesel">Bỏ chọn (Esc)</button></div>';
+  // --- CHỮ THẬT (chỉ layer chữ) ---
+  if(td){
+    h+='<div class="grpttl">Chữ</div>'
+      +'<div class="r"><label style="cursor:pointer"><input type="checkbox" id="sAsText"'+(td.asText?' checked':'')
+      +'> <b style="color:#bae6fd">Xuất CHỮ THẬT</b> <span style="opacity:.7">(SEO · nét · nhẹ)</span></label></div>'
+      +'<div class="r"><textarea id="sTxt" rows="2" style="width:100%;resize:vertical">'+esc(td.content||'')+'</textarea></div>'
+      +'<div class="r">Cỡ<input class="num" id="sTsize" value="'+esc(td.size||'')+'">'
+      +'Màu<input type="color" id="sTcolor" value="'+(td.color||'#ffffff')+'" style="width:44px;height:28px;padding:1px"></div>';
+  }
+  // --- LIÊN KẾT / NÚT / ALT (mọi layer) ---
+  h+='<div class="grpttl">Liên kết &amp; SEO</div>'
+    +'<div class="r">Hành động<select id="sAct">'
+    +LINK_ACTIONS.map(a=>'<option value="'+a[0]+'"'+(((lk.action)||'')===a[0]?' selected':'')+'>'+a[1]+'</option>').join('')
+    +'</select><label style="cursor:pointer"><input type="checkbox" id="sBtn"'+(lk.button?' checked':'')+'> là nút</label></div>'
+    +'<div class="r"><input id="sUrl" value="'+esc(lk.url||'')+'" placeholder="https://… (URL thật)" style="width:100%"></div>'
+    +'<div class="r">Alt<input id="sAlt" value="'+esc(l.alt||'')+'" placeholder="mô tả ảnh (SEO)" style="flex:1;min-width:120px"></div>';
+  p.innerHTML=h;
+  syncNums();
+  ['sX','sY','sW','sH'].forEach(k=>{ document.getElementById(k).onchange=onNumChange; });
+  document.getElementById('sFront').onclick=bringFront;
+  document.getElementById('sBack').onclick=sendBack;
+  document.getElementById('sDesel').onclick=deselect;
+  if(td){
+    const upT=()=>{ td.content=document.getElementById('sTxt').value;
+      td.size=+document.getElementById('sTsize').value||td.size; td.color=document.getElementById('sTcolor').value;
+      td.asText=document.getElementById('sAsText').checked;
+      saveEdit(l.id,{text:{content:td.content,size:td.size,color:td.color,asText:td.asText}});
+      render(); selectLayer(l.id); };
+    ['sAsText','sTxt','sTsize','sTcolor'].forEach(k=>document.getElementById(k).onchange=upT);
+  }
+  const upL=()=>{ l.link=l.link||{};
+    l.link.action=document.getElementById('sAct').value||null;
+    l.link.url=document.getElementById('sUrl').value.trim()||null;
+    l.link.button=document.getElementById('sBtn').checked;
+    saveEdit(l.id,{link:{action:l.link.action,url:l.link.url,button:l.link.button}}); };
+  ['sAct','sUrl','sBtn'].forEach(k=>document.getElementById(k).onchange=upL);
+  document.getElementById('sAlt').onchange=()=>{ l.alt=document.getElementById('sAlt').value; saveEdit(l.id,{alt:l.alt}); };
+}
+function syncNums(){ const l=curLayer(); if(!l) return; const b=l.bbox;
+  const set=(k,val)=>{const el=document.getElementById(k); if(el && document.activeElement!==el) el.value=Math.round(val);};
+  set('sX',b.x); set('sY',b.y); set('sW',b.width); set('sH',b.height); }
+function onNumChange(){ const l=curLayer(); if(!l) return;
+  const g=k=>Math.round(+((document.getElementById(k)||{}).value)||0);
+  l.bbox.x=g('sX'); l.bbox.y=g('sY'); l.bbox.width=Math.max(1,g('sW')); l.bbox.height=Math.max(1,g('sH'));
+  positionImg(l); drawSel(); recomputeSection(l); saveEdit(l.id,{bbox:l.bbox}); }
+function saveEdit(id, patch){
+  fetch("/edit",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({job_id:JOB, variant:curTab, patch:{[id]:patch}})}).catch(()=>{});
+}
+let _saveT=null, _savePend=null;
+function saveEditDebounced(id, patch){ _savePend={id,patch}; clearTimeout(_saveT);
+  _saveT=setTimeout(()=>{ if(_savePend) saveEdit(_savePend.id,_savePend.patch); }, 350); }
+// click nen preview: chon layer roi press-drag di chuyen; click nen trong -> bo chon
+document.getElementById('stage').addEventListener('pointerdown', function(e){
+  if(groupMode) return;
+  if(e.target.closest('.selov')) return;
+  const img=e.target.closest('.lyr');
+  if(!img){ deselect(); return; }
+  const id=img.dataset.id;
+  if(id!==sel) selectLayer(id, true);
+  startDrag(e,'move');
+});
+// phim mui ten nhich 1px (Shift=10px), Esc bo chon
+document.addEventListener('keydown', function(e){
+  if(!sel || groupMode) return;
+  if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName||'')) return;
+  if(e.key==='Escape'){ deselect(); return; }
+  const l=curLayer(); if(!l) return;
+  const step=e.shiftKey?10:1; let m=true;
+  if(e.key==='ArrowLeft') l.bbox.x-=step; else if(e.key==='ArrowRight') l.bbox.x+=step;
+  else if(e.key==='ArrowUp') l.bbox.y-=step; else if(e.key==='ArrowDown') l.bbox.y+=step; else m=false;
+  if(m){ e.preventDefault(); positionImg(l); drawSel(); syncNums(); recomputeSection(l); saveEditDebounced(l.id,{bbox:l.bbox}); }
+});
 
 // ---- GOP LAYER ----
 document.getElementById("grpMode").onclick=()=>{
   groupMode=!groupMode;
   document.getElementById("grpMode").classList.toggle("active", groupMode);
   document.getElementById("edHint").textContent=groupMode
-    ? "Che do GOP: bam vao anh de chon, roi 'Gop thanh 1 anh'. Bam 'tach' de bo group."
-    : "Bo tich = khong xuat anh do. Bam tieu de section de bat/tat ca section.";
+    ? "Chế độ GỘP: bấm vào các ảnh muốn gộp, rồi bấm 'Gộp thành 1 ảnh'. Bấm 'tách' để bỏ nhóm."
+    : "Bấm vào ảnh để chọn → kéo để di chuyển, kéo góc để đổi kích thước, phím mũi tên để nhích. Bỏ tích = không xuất ảnh đó.";
   if(!groupMode) groupSel[curTab].clear();
-  render();
+  sel=null; render();
 };
 document.getElementById("grpClear").onclick=()=>{ groupSel[curTab].clear(); render(); };
 document.getElementById("grpDo").onclick=()=>{
@@ -1022,28 +1598,29 @@ document.getElementById("grpDo").onclick=()=>{
   doGroup(ids, nm);
 };
 async function doGroup(members, name){
-  if((members||[]).length<2){ alert("Chon it nhat 2 anh de gop."); return; }
+  if((members||[]).length<2){ alert("Hãy chọn ít nhất 2 ảnh để gộp."); return; }
   const btn=document.getElementById("grpDo"); if(btn) btn.disabled=true;
   try{
     const r=await fetch("/group",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({job_id:JOB, variant:curTab, members, name:name||"Group"})}).then(x=>x.json());
-    if(r.error){ alert("Loi gop: "+r.error); return; }
+    if(r.error){ alert("Lỗi gộp: "+r.error); return; }
     MAN=r.manifest; groupSel[curTab].clear();
     document.getElementById("grpName").value="";
     render();
-  }catch(e){ alert("Loi gop: "+e); }
+  }catch(e){ alert("Lỗi gộp: "+e); }
   finally{ if(btn) btn.disabled=false; }
 }
 async function doUngroup(gid){
   const r=await fetch("/ungroup",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({job_id:JOB, variant:curTab, group_id:gid})}).then(x=>x.json());
-  if(r.error){ alert("Loi tach: "+r.error); return; }
+  if(r.error){ alert("Lỗi tách: "+r.error); return; }
   MAN=r.manifest; render();
 }
 
 document.getElementById("restart").onclick=()=>{
   editor.classList.remove("show"); exportPanel.classList.remove("show");
   document.getElementById("step1").style.display="block";
+  sel=null; layerQuery=""; setStep(1);
 };
 
 // ---- Xem thu web (render slices theo lua chon hien tai) ----
@@ -1057,22 +1634,22 @@ goReview.onclick=async()=>{
     disabled_desktop:[...disabled.desktop], disabled_mobile:[...disabled.mobile] };
   goReview.disabled=true; reviewBox.style.display="block"; reviewErr.textContent="";
   reviewBar.style.display="block"; reviewFrame.style.display="none"; reviewOpen.style.display="none";
-  reviewStep.textContent="Gui yeu cau...";
+  reviewStep.textContent="Đang gửi yêu cầu…";
   reviewBox.scrollIntoView({behavior:"smooth",block:"start"});
   let r;
   try{ r=await (await fetch("/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json(); }
-  catch(e){ reviewStep.textContent="Loi: "+e; goReview.disabled=false; return; }
-  if(r.error){ reviewStep.textContent="Loi: "+r.error; goReview.disabled=false; return; }
+  catch(e){ reviewStep.textContent="Lỗi: "+e; goReview.disabled=false; return; }
+  if(r.error){ reviewStep.textContent="Lỗi: "+r.error; goReview.disabled=false; return; }
   pollReview();
 };
 async function pollReview(){
   let s; try{ s=await (await fetch("/status/"+JOB)).json(); }
   catch(e){ setTimeout(pollReview,1200); return; }
-  reviewStep.textContent=s.step||"Dang xu ly...";
+  reviewStep.textContent=s.step||"Đang xử lý…";
   if(s.status==="done" && s.phase==="preview" && s.preview){
     reviewUrl=s.preview+"?t="+Date.now();
     reviewBar.style.display="none"; reviewFrame.style.display="block"; reviewFrame.src=reviewUrl;
-    reviewStep.textContent="\\u2713 Ban xem thu (theo anh dang chon)";
+    reviewStep.textContent="\\u2713 Bản xem thử (theo ảnh đang chọn)";
     reviewOpen.style.display="inline-block"; goReview.disabled=false; return; }
   if(s.status==="error" && s.phase==="preview"){ reviewBar.style.display="none";
     reviewErr.textContent=(s.error||"")+"\\n"+(s.trace||""); goReview.disabled=false; return; }
@@ -1089,34 +1666,36 @@ goExport.onclick=async()=>{
     disabled_desktop:[...disabled.desktop], disabled_mobile:[...disabled.mobile] };
   ["swiper_lib","env_config","nav_menu","popups","ai_enhance","fluid"].forEach(k=>body[k]=document.getElementById(k).checked);
   goExport.disabled=true; exportPanel.classList.add("show");
-  exProgress.style.display="block"; result.style.display="none"; exStep.textContent="Gui yeu cau...";
+  exProgress.style.display="block"; result.style.display="none"; exStep.textContent="Đang gửi yêu cầu…";
+  exportPanel.scrollIntoView({behavior:"smooth",block:"start"});
   let r;
   try{
     const resp=await fetch("/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     r=await resp.json();
-  }catch(e){ exStep.textContent="Loi: "+e; goExport.disabled=false; return; }
-  if(r.error){ exStep.textContent="Loi: "+r.error; goExport.disabled=false; return; }
+  }catch(e){ exStep.textContent="Lỗi: "+e; goExport.disabled=false; return; }
+  if(r.error){ exStep.textContent="Lỗi: "+r.error; goExport.disabled=false; return; }
   pollExport();
 };
 
 async function pollExport(){
   let s; try{ s=await (await fetch("/status/"+JOB)).json(); }
   catch(e){ setTimeout(pollExport,1500); return; }
-  exStep.textContent=s.step||"Dang xu ly...";
+  exStep.textContent=s.step||"Đang xử lý…";
   if(s.status==="done" && s.phase==="export"){ showResult(s); goExport.disabled=false; return; }
   if(s.status==="error"){ exProgress.style.display="none"; result.style.display="block";
-    result.innerHTML='<b style="color:#fca5a5">Loi khi xuat:</b><div class="err">'+(s.error||"")+'\\n'+(s.trace||"")+'</div>';
+    result.innerHTML='<b style="color:#fca5a5">Lỗi khi xuất:</b><div class="err">'+(s.error||"")+'\\n'+(s.trace||"")+'</div>';
     goExport.disabled=false; return; }
   setTimeout(pollExport,1500);
 }
 
 function showResult(s){
+  setStep(3);
   exProgress.style.display="none"; result.style.display="block";
-  let html='<b style="color:#4ade80">\\u2713 Xong!</b> ';
-  if(s.download) html+='<a class="dl" href="'+s.download+'">\\u2B07 Tai ZIP ket qua</a>';
+  let html='<b style="color:#4ade80;font-size:16px">\\u2705 Xuất thành công!</b> ';
+  if(s.download) html+='<a class="dl" href="'+s.download+'">\\u2B07 Tải ZIP kết quả</a>';
   if(s.preview){ html+='<iframe src="'+s.preview+'?t='+Date.now()+'"></iframe>'; }
   else if(s.files && s.files.length){ html+='<div class="files">'+s.files.join("<br>")+'</div>'
-    +'<p style="color:#94a3b8;font-size:13px">Project React/Next da tao. Giai nen ZIP roi chay: <code>npm install &amp;&amp; npm run dev</code></p>'; }
+    +'<p style="color:#94a3b8;font-size:13px">Đã tạo project React/Next. Giải nén ZIP rồi chạy: <code>npm install &amp;&amp; npm run dev</code></p>'; }
   result.innerHTML=html;
 }
 </script>
@@ -1124,8 +1703,15 @@ function showResult(s){
 
 
 def main():
-    print("psd2html web UI: mo http://localhost:5000")
-    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
+    # Host/port cau hinh qua bien moi truong:
+    #   PSD2HTML_HOST=0.0.0.0  -> may khac cung mang LAN truy cap duoc (qua IP may nay)
+    #   PSD2HTML_PORT=5000
+    host = _os.environ.get("PSD2HTML_HOST", "127.0.0.1")
+    port = int(_os.environ.get("PSD2HTML_PORT", "5000"))
+    print(f"psd2html web UI: dang chay tren {host}:{port}")
+    if host == "0.0.0.0":
+        print("  -> May khac cung mang mo: http://<IP-may-nay>:%d" % port)
+    app.run(host=host, port=port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
