@@ -110,6 +110,8 @@ def render(out_dir, swiper=False):
     items_css = [
         "* { margin: 0; padding: 0; box-sizing: border-box; }",
         "body { background: #000; }",
+        ".sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; "
+        "overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }",
         ".stage-wrap { width: 100%; overflow: hidden; }",
         f".stage {{ position: relative; width: {cw}px; height: {stage_h}px;"
         f" margin: 0 auto; transform-origin: top left; overflow: hidden; }}",
@@ -152,7 +154,13 @@ def render(out_dir, swiper=False):
                      f"font-size:{fs}px;color:{col};line-height:1.15;white-space:pre-wrap;font-weight:700;")
         rule += "}"
 
-        load = ' loading="lazy"' if lazy else ""
+        # width/height that (best practice: giu ti le, giup trinh duyet dat cho som)
+        wh = f' width="{b["width"]}" height="{b["height"]}"'
+        # LCP: anh lon tren dau -> tai NGAY + uu tien cao (khong lazy). Con lai lazy.
+        if l["id"] == lcp_id:
+            load = ' loading="eager" fetchpriority="high"'
+        else:
+            load = ' loading="lazy"' if lazy else ' loading="eager"'
         # nut/link: nguoi dung danh dau (button), co url/action, hoac keyword
         is_btn = bool(link.get("button") or link.get("url") or link.get("action")) or _is_interactive(l)
         act = link.get("action") or _action_of(l)
@@ -168,13 +176,23 @@ def render(out_dir, swiper=False):
                 h = f'<div class="node txt {cls}">{content}</div>'
         elif is_btn:
             h = (f'<a class="node hot {cls}" href="{href}" data-action="{act}"{tgt} title="{alt}">'
-                 f'<img src="{l["asset"]}" alt="{alt}"{load} decoding="async"></a>')
+                 f'<img src="{l["asset"]}" alt="{alt}"{wh}{load} decoding="async"></a>')
         else:
-            h = f'<img class="node {cls}" src="{l["asset"]}" alt="{alt}"{load} decoding="async">'
+            h = f'<img class="node {cls}" src="{l["asset"]}" alt="{alt}"{wh}{load} decoding="async">'
         return h, rule
 
     sections = layout.get("sections")
     swiper = swiper and bool(sections)  # swiper chi co nghia khi co nhieu section
+
+    # LCP: anh (khong phai chu) DIEN TICH LON NHAT o phan tren trang -> tai som + preload.
+    def _area(l):
+        b = l["bbox"]; return b["width"] * b["height"]
+    _top_y1 = sections[0]["y1"] if sections else ch
+    _cands = [l for l in layers if l.get("asset") and not (l.get("text") or {}).get("asText")]
+    _top = [l for l in _cands if l["bbox"]["y"] < _top_y1]
+    _pool = _top or _cands
+    lcp_id = max(_pool, key=_area)["id"] if _pool else None
+    lcp_asset = next((l["asset"] for l in _pool if l["id"] == lcp_id), None) if lcp_id else None
     if sections:
         # Gom layer theo section (moi layer nam gon trong 1 section sau khi clip).
         groups = {i: [] for i in range(len(sections))}
@@ -192,7 +210,8 @@ def render(out_dir, swiper=False):
                 items_css.append(rule)
                 inner.append(h)
             rev = "" if (i == 0 or swiper) else " reveal"  # swiper dung fade rieng, khong reveal
-            blocks.append(f'<section id="sec{i}" class="sec sec{i}{rev}" data-sec="{i}">'
+            _al = html_mod.escape((s.get("name") or f"Section {i + 1}"), quote=True)
+            blocks.append(f'<section id="sec{i}" class="sec sec{i}{rev}" data-sec="{i}" aria-label="{_al}">'
                           + "".join("\n      " + x for x in inner) + "\n    </section>")
         body = "".join("\n    " + b for b in blocks)
     else:
@@ -273,14 +292,15 @@ def render(out_dir, swiper=False):
             items_css.append(rule)
             # muc menu bam duoc: chu ngan (loai logo to, icon chuot cao, duong ke mong)
             is_nav = bool(it.get("alt")) and 15 <= it["w"] <= 220 and 15 <= it["h"] <= 60
+            _wh = f' width="{it["w"]}" height="{it["h"]}"'
             if is_nav:
                 fx.append(f'<a class="node navitem {cls}" href="#" data-nav="{nav_count}" title="{alt}">'
-                          f'<img src="{it["asset"]}" alt="{alt}" decoding="async"></a>')
+                          f'<img src="{it["asset"]}" alt="{alt}"{_wh} decoding="async"></a>')
                 nav_count += 1
             else:
-                fx.append(f'<img class="node {cls}" src="{it["asset"]}" alt="{alt}" decoding="async">')
-        fixed_html = ('<div class="fixed-wrap"><div class="fixed-stage">'
-                      + "".join("\n    " + x for x in fx) + "\n  </div></div>")
+                fx.append(f'<img class="node {cls}" src="{it["asset"]}" alt="{alt}"{_wh} decoding="async">')
+        fixed_html = ('<nav class="fixed-wrap" aria-label="Điều hướng"><div class="fixed-stage">'
+                      + "".join("\n    " + x for x in fx) + "\n  </div></nav>")
         fixed_block = ("\n    var fstage=document.querySelector('.fixed-stage');"
                        "\n    if(fstage) fstage.style.transform='scale('+s+')';")
 
@@ -387,17 +407,38 @@ __COMMON__
               .replace("__FIXEDSCALE__", fixed_scale)
               .replace("__COMMON__", common_ui))
 
+    # ---- SEO / a11y: tieu de + mo ta lay tu cac layer CHU (chon layer dien tich lon) ----
+    def _clean(l):
+        return " ".join(((l.get("text") or {}).get("content") or "").split()).strip()
+    txt_layers = sorted([l for l in layers if _clean(l)],
+                        key=lambda l: l["bbox"]["width"] * l["bbox"]["height"], reverse=True)
+    page_title = (_clean(txt_layers[0]) if txt_layers else layout.get("source", "Landing"))[:70]
+    page_desc = (" · ".join(_clean(l) for l in txt_layers[:6]) or page_title)[:160]
+    esc = lambda s: html_mod.escape(s or "", quote=True)
+    favicon = ("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+               "<text y='.9em' font-size='90'>%F0%9F%8E%AE</text></svg>")
+
     html_doc = f"""<!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{html_mod.escape(layout.get('source', 'Landing'))}</title>
-<link rel="stylesheet" href="style.css">
+<title>{esc(page_title)}</title>
+<meta name="description" content="{esc(page_desc)}">
+<meta property="og:type" content="website">
+<meta property="og:title" content="{esc(page_title)}">
+<meta property="og:description" content="{esc(page_desc)}">
+<meta property="og:image" content="{esc(layout.get('screenshot', 'screenshot.png'))}">
+<meta name="theme-color" content="#0b1120">
+<link rel="icon" href="{favicon}">
+{('<link rel="preload" as="image" href="' + esc(lcp_asset) + '" fetchpriority="high">' + chr(10)) if lcp_asset else ''}<link rel="stylesheet" href="style.css">
 </head>
 <body>
 {fixed_html}
-{body_wrap}
+<main>
+  <h1 class="sr-only">{esc(page_title)}</h1>
+  {body_wrap}
+</main>
 {modal_html}{js}
 </body>
 </html>

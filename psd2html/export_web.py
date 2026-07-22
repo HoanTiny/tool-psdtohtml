@@ -413,7 +413,7 @@ def _gen_types():
     return (
         "export interface LayerItem {\n"
         "  id: string; src: string; x: number; y: number; w: number; h: number;\n"
-        "  o: number; blend?: string | null; alt?: string;\n"
+        "  o: number; blend?: string | null; alt?: string; cls?: string;\n"
         "  href?: string | null; act?: string | null; menu?: boolean; toggle?: boolean;\n"
         "  asText?: boolean; text?: string; tsize?: number; tcolor?: string;\n}\n\n"
         "export interface FixedItem {\n"
@@ -421,7 +421,7 @@ def _gen_types():
         "  o: number; blend?: string | null; alt?: string; href?: string | null; nav?: number | null;\n}\n\n"
         "export interface SlotItem { src: string; x: number; y: number; w: number; h: number; alt?: string; }\n\n"
         "export interface RepeatItem {\n"
-        "  id: number; x: number; y: number; claimed?: boolean;\n"
+        "  id: number; x: number; y: number; claimed?: boolean; cls?: string;\n"
         "  items?: SlotItem[]; [key: string]: unknown;\n}\n\n"
         "export interface SectionProps {\n"
         "  onClaim?: (id: number) => void; menuOpen?: boolean; onToggleMenu?: () => void;\n}\n"
@@ -535,17 +535,13 @@ def _gen_popups(lang, client):
         "  if (!type) return null;\n"
         "  return (\n"
         '    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}\n'
-        '      style={{ position: "fixed", inset: 0, background: "rgba(4,8,20,.72)", display: "flex",\n'
-        '        alignItems: "center", justifyContent: "center", zIndex: 3000 }}>\n'
-        '      <div style={{ position: "relative", background: "#111a2e", border: "1px solid #33507e",\n'
-        '        borderRadius: 16, padding: "30px 34px", maxWidth: 460, width: "90%", color: "#e8eeff", textAlign: "center" }}>\n'
-        '        <button onClick={onClose} style={{ position: "absolute", top: 8, right: 14,\n'
-        '          background: "none", border: 0, color: "#7d90b5", fontSize: 24, cursor: "pointer" }}>&times;</button>\n'
-        '        <h3 style={{ margin: "0 0 10px", fontSize: 20 }}>{TITLES[type] || "Thông báo"}</h3>\n'
-        '        <p style={{ margin: "0 0 20px", color: "#9db0d6", fontSize: 14, lineHeight: 1.5 }}>\n'
+        '      className="fixed inset-0 z-[3000] flex items-center justify-center bg-[rgba(4,8,20,.72)]">\n'
+        '      <div className="relative w-[90%] max-w-[460px] rounded-2xl border border-[#33507e] bg-[#111a2e] px-[34px] py-[30px] text-center text-[#e8eeff]">\n'
+        '        <button onClick={onClose} className="absolute right-[14px] top-2 cursor-pointer border-0 bg-transparent text-2xl text-[#7d90b5]">&times;</button>\n'
+        '        <h3 className="mb-[10px] text-xl">{TITLES[type] || "Thông báo"}</h3>\n'
+        '        <p className="mb-5 text-sm leading-normal text-[#9db0d6]">\n'
         "          {DESCS[type] || ('Chức năng \"' + type + '\": cắm nội dung / API tại đây.')}</p>\n"
-        '        <button onClick={onClose} style={{ background: "linear-gradient(90deg,#2563eb,#3b82f6)",\n'
-        '          color: "#fff", border: 0, borderRadius: 9, padding: "11px 26px", fontWeight: 700, cursor: "pointer" }}>Đóng</button>\n'
+        '        <button onClick={onClose} className="cursor-pointer rounded-[9px] border-0 bg-gradient-to-r from-[#2563eb] to-[#3b82f6] px-[26px] py-[11px] font-bold text-white">Đóng</button>\n'
         "      </div>\n    </div>\n  );\n}\n")
 
 
@@ -581,37 +577,63 @@ def _gen_layer(lang, client):
     imp = 'import type { LayerItem } from "../../types/landing";\n\n' if lang == "ts" else ""
     sig = ("{ l, menuOpen, onToggleMenu }: { l: LayerItem; menuOpen?: boolean; onToggleMenu?: () => void }"
            if lang == "ts" else "{ l, menuOpen, onToggleMenu }")
-    style_ty = _ann(lang, "React.CSSProperties")
-    react_imp = 'import type React from "react";\n' if lang == "ts" else ""
-    anyc = ' as any' if lang == "ts" else ''
+    react_imp = ""
+    # THUAN TAILWIND: l.cls chua san class Tailwind (left-[..]/top-[..]/w-[..]/h-[..]/
+    # mix-blend/opacity, va text-[..px]/text-[color] cho chu that). Khong con inline style.
     return head + react_imp + imp + (
-        f"// 1 lop: anh (img) HOAC chu that (text). Tu xu ly nut menu (toggle) + link ngoai.\n"
+        f"// 1 lop: anh (img) HOAC chu that (text). Class Tailwind lay tu l.cls (khong inline style).\n"
         f"export default function Layer({sig}) {{\n"
         f"  const ext = !!(l.href && /^https?:/.test(l.href));\n"
-        f"  const style{style_ty} = {{ left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o, mixBlendMode: (l.blend || undefined){anyc} }};\n"
         "  if (l.asText) {\n"
-        f"    const ts{style_ty} = {{ ...style, display: 'flex', alignItems: 'center', justifyContent: 'center',\n"
-        "      textAlign: 'center', fontWeight: 700, lineHeight: 1.15, whiteSpace: 'pre-wrap', overflow: 'hidden',\n"
-        f"      fontSize: (l.tsize || 20), color: (l.tcolor || '#fff') }}{anyc};\n"
         "    return l.href ? (\n"
         '      <a href={l.href} data-action={l.act || "other"} target={ext ? "_blank" : undefined} rel={ext ? "noopener" : undefined}\n'
-        '        title={l.alt} className="hot absolute" style={ts}>{l.text}</a>\n'
+        '        title={l.alt} className={"hot " + l.cls}>{l.text}</a>\n'
         "    ) : (\n"
-        '      <div className="absolute" style={ts}>{l.text}</div>\n'
+        "      <div className={l.cls}>{l.text}</div>\n"
         "    );\n  }\n"
         "  if (l.toggle) {\n"
         "    return (\n"
         '      <button onClick={onToggleMenu} title={l.alt}\n'
-        '        className="absolute block cursor-pointer transition hover:brightness-110" style={style}>\n'
-        '        <img src={l.src} alt={l.alt} className="block w-full h-full" loading="lazy" decoding="async" />\n'
+        '        className={"cursor-pointer transition hover:brightness-110 " + l.cls}>\n'
+        '        <img src={l.src} alt={l.alt} width={l.w} height={l.h} className="block w-full h-full" loading={l.lcp ? "eager" : "lazy"} fetchPriority={l.lcp ? "high" : undefined} decoding="async" />\n'
         "      </button>\n    );\n  }\n"
         "  if (l.menu && !menuOpen) return null;\n"
         "  return l.href ? (\n"
         '    <a href={l.href} data-action={l.act || "other"} target={ext ? "_blank" : undefined} rel={ext ? "noopener" : undefined}\n'
-        '      title={l.alt} className="hot absolute block" style={style}>\n'
+        '      title={l.alt} className={"hot " + l.cls}>\n'
         '      <img src={l.src} alt={l.alt} className="block w-full h-full" loading="lazy" decoding="async" />\n'
         "    </a>\n  ) : (\n"
-        '    <img src={l.src} alt={l.alt} className="absolute block" style={style} loading="lazy" decoding="async" />\n  );\n}\n')
+        "    <img src={l.src} alt={l.alt} width={l.w} height={l.h} className={l.cls} loading={l.lcp ? \"eager\" : \"lazy\"} fetchPriority={l.lcp ? \"high\" : undefined} decoding=\"async\" />\n  );\n}\n")
+
+
+def _tw_pos(x, y, w, h):
+    """Class Tailwind (arbitrary values) cho vi tri/kich thuoc tuyet doi."""
+    return f"left-[{round(x)}px] top-[{round(y)}px] w-[{round(w)}px] h-[{round(h)}px]"
+
+
+def _tw_cls(it, block=True):
+    """Sinh chuoi class Tailwind THUAN cho 1 layer (thay inline style). Tailwind JIT
+    quet duoc class literal ke ca khi nam trong mang data trong file .tsx."""
+    parts = ["absolute"]
+    if it.get("asText"):
+        parts += ["flex", "items-center", "justify-center", "text-center", "font-bold",
+                  "leading-tight", "whitespace-pre-wrap", "overflow-hidden"]
+        if it.get("tsize"):
+            parts.append(f"text-[{int(it['tsize'])}px]")
+        if it.get("tcolor"):
+            parts.append(f"text-[{it['tcolor']}]")
+    elif block:
+        parts.append("block")
+    parts.append(_tw_pos(it["x"], it["y"], it["w"], it["h"]))
+    o = it.get("o", 1)
+    try:
+        if o is not None and float(o) < 0.999:
+            parts.append(f"opacity-[{round(float(o), 3)}]")
+    except Exception:
+        pass
+    if it.get("blend"):
+        parts.append(f"mix-blend-{it['blend']}")
+    return " ".join(parts)
 
 
 def _flat_json(items):
@@ -634,8 +656,22 @@ def _flat_json(items):
             o["menu"] = True
         if it.get("toggle"):
             o["toggle"] = True
+        if it.get("lcp"):
+            o["lcp"] = True           # anh LCP -> tai som + uu tien cao
+        o["cls"] = _tw_cls(o)          # class Tailwind san (thay inline style)
         keep.append(o)
     return json.dumps(keep, ensure_ascii=False, indent=2)
+
+
+def _mark_lcp(board):
+    """Danh dau anh LCP (dien tich lon nhat o phan tren: backgrounds + section dau)."""
+    cands = list(board.get("backgrounds", []))
+    secs = board.get("sections", [])
+    if secs:
+        cands += [it for it in secs[0].get("flat", []) if not it.get("asText")]
+    cands = [it for it in cands if it.get("src") and not it.get("asText")]
+    if cands:
+        max(cands, key=lambda it: it.get("w", 0) * it.get("h", 0))["lcp"] = True
 
 
 def _gen_background(board, lang, client):
@@ -645,9 +681,8 @@ def _gen_background(board, lang, client):
     return head + imp + decl + (
         "export default function Background() {\n  return (\n    <>\n"
         "      {bg.map((l) => (\n"
-        '        <img key={l.id} src={l.src} alt={l.alt} className="absolute block" loading="lazy" decoding="async"\n'
-        "          style={{ left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o, mixBlendMode: (l.blend || undefined)"
-        + (' as any' if lang == "ts" else "") + " }} />\n"
+        '        <img key={l.id} src={l.src} alt={l.alt} width={l.w} height={l.h} className={l.cls}\n'
+        '          loading={l.lcp ? "eager" : "lazy"} fetchPriority={l.lcp ? "high" : undefined} decoding="async" />\n'
         "      ))}\n    </>\n  );\n}\n")
 
 
@@ -657,28 +692,29 @@ def _gen_repeat(rp, lang, client):
     sig = ("{ item, onClaim }: { item: RepeatItem; onClaim?: (id: number) => void }"
            if lang == "ts" else "{ item, onClaim }")
     if rp["grid"].get("is_grid"):
-        root = f'    <div className="relative shrink-0" style={{{{ width: {rp["W"]}, height: {rp["H"]} }}}}>'
-    else:  # cum bat quy tac (so le) -> giu absolute theo item.x/item.y
-        root = (f'    <div className="absolute" style={{{{ left: item.x, top: item.y, '
-                f'width: {rp["W"]}, height: {rp["H"]} }}}}>')
+        root = f'    <div className="relative shrink-0 w-[{rp["W"]}px] h-[{rp["H"]}px]">'
+    else:  # cum bat quy tac (so le) -> vi tri instance qua item.cls (Tailwind)
+        root = '    <div className={"absolute " + (item.cls || "")}>'
     L = [head + imp, f"export default function {rp['comp']}({sig}) {{",
          "  return (", root]
     for sl in rp["slots"]:
-        style = (f'{{{{ left: {sl["rx"]}, top: {sl["ry"]}, width: {sl["w"]}, height: {sl["h"]}, opacity: {sl["o"]}'
-                 + (f', mixBlendMode: "{sl["blend"]}"' if sl.get("blend") else "") + " }}")
+        cls = _tw_cls({"x": sl["rx"], "y": sl["ry"], "w": sl["w"], "h": sl["h"],
+                       "o": sl["o"], "blend": sl.get("blend")})
         if sl["kind"] == "button":
             L.append(f'      <button onClick={{() => onClaim && onClaim(item.id)}} title="{sl["alt"]}"')
-            L.append(f'        className="absolute block cursor-pointer transition hover:brightness-110" style={style}>')
+            L.append(f'        className="cursor-pointer transition hover:brightness-110 {cls}">')
             L.append(f'        <img src="{sl["asset"]}" alt="{sl["alt"]}" className="block w-full h-full" />')
             L.append("      </button>")
         elif sl["kind"] == "var":
-            L.append(f'      {{item.{sl["var"]} ? <img className="absolute block" style={style} '
+            L.append(f'      {{item.{sl["var"]} ? <img className="{cls}" '
                      f'src={{item.{sl["var"]} as string}} alt="{sl["alt"]}" /> : null}}'
                      if lang == "ts" else
-                     f'      {{item.{sl["var"]} && <img className="absolute block" style={style} '
+                     f'      {{item.{sl["var"]} && <img className="{cls}" '
                      f'src={{item.{sl["var"]}}} alt="{sl["alt"]}" />}}')
         else:
-            L.append(f'      <img className="absolute block" style={style} src="{sl["asset"]}" alt="{sl["alt"]}" />')
+            L.append(f'      <img className="{cls}" src="{sl["asset"]}" alt="{sl["alt"]}" />')
+    # item.items = du lieu tu API (runtime) -> vi tri dong, dung style toi thieu (khong the
+    # thanh class Tailwind tinh). Mac dinh rong; chi dung khi do API vao.
     L.append('      {(item.items || []).map((it, i) => (')
     L.append('        <img key={i} className="absolute block" src={it.src} alt={it.alt || ""}')
     L.append("          style={{ left: it.x, top: it.y, width: it.w, height: it.h }} />")
@@ -711,6 +747,7 @@ def _gen_section(sec, lang, client):
             e.update(inst["vars"])
             e["claimed"] = False
             e["items"] = []
+            e["cls"] = _tw_pos(inst["x"], inst["y"] - y0, rp["W"], rp["H"])  # vi tri instance (Tailwind)
             data.append(e)
         blocks.append(f"// {rp['count']} phan tu lap - thay bang data tu API\n"
                       f"const {var}{_ann(lang, 'RepeatItem[]')} = {json.dumps(data, ensure_ascii=False, indent=2)};\n")
@@ -724,9 +761,9 @@ def _gen_section(sec, lang, client):
         g = rp["grid"]
         if g.get("is_grid"):
             # Cum LUOI DEU = container FLEX-WRAP (bo tung the absolute) -> tu xep lai hang.
-            body.append(f'      <div style={{{{ position: "absolute", left: {g["x"]}, top: {g["y"] - y0}, '
-                        f'width: {g["w"]}, display: "flex", flexWrap: "wrap", justifyContent: "center", '
-                        f'alignContent: "flex-start", gap: "{g["gy"]}px {g["gx"]}px" }}}}>')
+            body.append(f'      <div className="absolute left-[{g["x"]}px] top-[{g["y"] - y0}px] '
+                        f'w-[{g["w"]}px] flex flex-wrap justify-center content-start '
+                        f'gap-x-[{g["gx"]}px] gap-y-[{g["gy"]}px]">')
             body.append(f"        {{{var}.map((it) => (")
             body.append(f'          <{rp["comp"]} key={{it.id}} item={{it}} onClaim={{onClaim}} />')
             body.append("        ))}")
@@ -790,16 +827,14 @@ _LANDING_EFFECT = r'''  useEffect(() => {
 
 _LANDING_MODAL = r'''      {modal && (
         <div onClick={(e) => { if (e.target === e.currentTarget) setModal(null); }}
-          style={{ position: "fixed", inset: 0, background: "rgba(4,8,20,.72)", display: "flex",
-            alignItems: "center", justifyContent: "center", zIndex: 3000 }}>
-          <div style={{ position: "relative", background: "#111a2e", border: "1px solid #33507e",
-            borderRadius: 16, padding: "30px 34px", maxWidth: 420, width: "90%", color: "#e8eeff", textAlign: "center" }}>
-            <button onClick={() => setModal(null)} style={{ position: "absolute", top: 8, right: 14,
-              background: "none", border: 0, color: "#7d90b5", fontSize: 24, cursor: "pointer" }}>&times;</button>
-            <h3 style={{ margin: "0 0 10px", fontSize: 20 }}>{modal.title}</h3>
-            <p style={{ margin: "0 0 20px", color: "#9db0d6", fontSize: 14, lineHeight: 1.5 }}>{modal.desc}</p>
-            <button onClick={() => setModal(null)} style={{ background: "linear-gradient(90deg,#2563eb,#3b82f6)",
-              color: "#fff", border: 0, borderRadius: 9, padding: "11px 26px", fontWeight: 700, cursor: "pointer" }}>Đóng</button>
+          className="fixed inset-0 z-[3000] flex items-center justify-center bg-[rgba(4,8,20,.72)]">
+          <div className="relative w-[90%] max-w-[420px] rounded-2xl border border-[#33507e] bg-[#111a2e] px-[34px] py-[30px] text-center text-[#e8eeff]">
+            <button onClick={() => setModal(null)}
+              className="absolute right-[14px] top-2 cursor-pointer border-0 bg-transparent text-2xl text-[#7d90b5]">&times;</button>
+            <h3 className="mb-[10px] text-xl">{modal.title}</h3>
+            <p className="mb-5 text-sm leading-normal text-[#9db0d6]">{modal.desc}</p>
+            <button onClick={() => setModal(null)}
+              className="cursor-pointer rounded-[9px] border-0 bg-gradient-to-r from-[#2563eb] to-[#3b82f6] px-[26px] py-[11px] font-bold text-white">Đóng</button>
           </div>
         </div>
       )}'''
@@ -1012,6 +1047,37 @@ def _gen_fluid_mobile(board, lang, client):
     return "\n".join(L)
 
 
+def _ctext_of(l):
+    s = l.get("text") or (l.get("alt") if l.get("t") else "") or ""
+    return " ".join(str(s).split()).strip()
+
+
+def _seo_texts_from_layout(layout):
+    """Noi dung layer CHU (GIU nguyen hoa/thuong, ca cau) sap theo dien tich giam dan."""
+    def c(l):
+        return " ".join(((l.get("text") or {}).get("content") or "").split()).strip()
+    ts = sorted([l for l in layout.get("layers", []) if c(l)],
+                key=lambda l: l["bbox"]["width"] * l["bbox"]["height"], reverse=True)
+    return [c(l) for l in ts]
+
+
+def _page_title(board):
+    """Tieu de trang (SEO/a11y). Uu tien text goc tu layout (board['page_title'])."""
+    if board.get("page_title"):
+        return board["page_title"][:70]
+    txts = sorted([l for s in board.get("sections", []) for l in s.get("flat", []) if _ctext_of(l)],
+                  key=lambda l: l.get("w", 0) * l.get("h", 0), reverse=True)
+    return (_ctext_of(txts[0]) if txts else board.get("landing_name", "Landing"))[:70]
+
+
+def _page_desc(board):
+    if board.get("page_desc"):
+        return board["page_desc"][:160]
+    txts = sorted([l for s in board.get("sections", []) for l in s.get("flat", []) if _ctext_of(l)],
+                  key=lambda l: l.get("w", 0) * l.get("h", 0), reverse=True)
+    return (" · ".join(_ctext_of(l) for l in txts[:6]) or _page_title(board))[:160]
+
+
 def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=None):
     head = '"use client";\n\n' if client else ""
     comp = board["landing_name"]
@@ -1025,6 +1091,10 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
     nav_tag = "NavMenu" if use_navmenu else ("FixedNav" if has_fixed else None)
     ys = [s.get("y0", 0) for s in secs]
     bands = [(ys[i], max(1, (ys[i + 1] if i + 1 < len(secs) else H) - ys[i])) for i in range(len(secs))]
+
+    # SEO/a11y: tieu de trang tu layer chu lon nhat
+    page_title = _page_title(board) or comp
+    h1_jsx = f'      <h1 className="sr-only">{{{json.dumps(page_title, ensure_ascii=False)}}}</h1>'
 
     imports = ['import { useState, useEffect, useRef } from "react";',
                'import { LINKS, LABELS } from "../../landing.config";']
@@ -1069,11 +1139,10 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
             cy = bg["y"] + bg["h"] / 2
             if not (y0 <= cy < y0 + hb):
                 continue
-            blend = f', mixBlendMode: {json.dumps(bg["blend"])}' if bg.get("blend") else ""
+            cls = _tw_cls({"x": bg["x"], "y": bg["y"] - y0, "w": bg["w"], "h": bg["h"],
+                           "o": bg.get("o", 1), "blend": bg.get("blend")})
             out.append(f'{indent}<img key={json.dumps(bg["id"])} src={json.dumps(bg["src"])} '
-                       f'alt={json.dumps(bg.get("alt", ""))} loading="lazy" decoding="async" '
-                       f'style={{{{ position: "absolute", left: {bg["x"]}, top: {bg["y"] - y0}, '
-                       f'width: {bg["w"]}, height: {bg["h"]}, opacity: {bg.get("o", 1)}{blend} }}}} />')
+                       f'alt={json.dumps(bg.get("alt", ""))} loading="lazy" decoding="async" className="{cls}" />')
         return out
 
     if swiper_lib:
@@ -1086,18 +1155,19 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         L.append(_LANDING_SWIPERLIB_EFFECT.replace("__N__", str(len(secs))).replace("__W__", str(W))
                  .replace("__QS__", qs).replace("__ASH__", ash))
         L.append("  return (")
-        L.append('    <div ref={rootRef}>')
+        L.append('    <main ref={rootRef}>')
+        L.append(h1_jsx)
         if nav_tag:
             L.append(f"      <{nav_tag} />")
         L.append('      <Swiper direction="vertical" slidesPerView={1} effect="fade" fadeEffect={{ crossFade: true }}')
         L.append('        mousewheel={{ sensitivity: 0.3, thresholdDelta: 20, thresholdTime: 300, releaseOnEdges: true }}')
-        L.append('        modules={[Mousewheel, EffectFade]} className="w-full" style={{ height: "100dvh" }}')
+        L.append('        modules={[Mousewheel, EffectFade]} className="w-full h-[100dvh]"')
         L.append('        onSwiper={(sw) => { swiperRef.current = sw; }} onSlideChange={(sw) => setActiveIndex(sw.activeIndex)}>')
         for i, sec in enumerate(secs):
             y0, hb = bands[i]
             L.append(f"        <SwiperSlide key={{{i}}}>")
-            L.append('          <div className="w-full flex items-center justify-center overflow-hidden" style={{ height: "100dvh" }}>')
-            L.append(f'            <div className="slide-stage" style={{{{ position: "relative", flexShrink: 0, width: {W}, height: {hb}, transformOrigin: "center center" }}}}>')
+            L.append('          <div className="w-full flex items-center justify-center overflow-hidden h-[100dvh]">')
+            L.append(f'            <div className="slide-stage relative shrink-0 w-[{W}px] h-[{hb}px] origin-center">')
             L += _bg_imgs(y0, hb, "              ")
             L.append(f"              <{sec['comp']} {{...props}} />")
             L.append("            </div>")
@@ -1105,34 +1175,34 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
             L.append("        </SwiperSlide>")
         L.append("      </Swiper>")
         L.append(modal_block)
-        L += ["    </div>", "  );", "}", ""]
+        L += ["    </main>", "  );", "}", ""]
     elif swiper:
         max_sec_h = max(b[1] for b in bands)
         L.append(_LANDING_SWIPER_EFFECT.replace("useRef(null)", f"useRef{refann}(null)").replace("__W__", str(W)))
         L.append("  return (")
-        L.append("    <>")
+        L.append("    <main>")
+        L.append(h1_jsx)
         if nav_tag:
             L.append(f"      <{nav_tag} />")
-        L.append('      <div ref={ref} className="deck" style={{ position: "fixed", inset: 0, overflow: "hidden", '
-                 'background: "#000", display: "flex", alignItems: "center", justifyContent: "center" }}>')
-        L.append(f'        <div ref={{stageRef}} style={{{{ position: "relative", flexShrink: 0, width: {W}, height: {max_sec_h}, '
-                 'transformOrigin: "center center" }}>')
+        L.append('      <div ref={ref} className="deck fixed inset-0 overflow-hidden bg-black flex items-center justify-center">')
+        L.append(f'        <div ref={{stageRef}} className="relative shrink-0 w-[{W}px] h-[{max_sec_h}px] origin-center">')
         for i, sec in enumerate(secs):
             y0, hb = bands[i]
-            L.append(f'          <div className="landing-sec" data-sec="{i}" style={{{{ position: "absolute", '
-                     f'left: 0, top: 0, width: {W}, height: {hb} }}}}>')
+            _al = json.dumps(sec.get("comp") or f"Section {i + 1}", ensure_ascii=False)
+            L.append(f'          <section aria-label={{{_al}}} className="landing-sec absolute left-0 top-0 w-[{W}px] h-[{hb}px]" data-sec="{i}">')
             L += _bg_imgs(y0, hb, "            ")
             L.append(f"            <{sec['comp']} {{...props}} />")
-            L.append("          </div>")
+            L.append("          </section>")
         L.append("        </div>")
         L.append("      </div>")
         L.append(modal_block)
-        L += ["    </>", "  );", "}", ""]
+        L += ["    </main>", "  );", "}", ""]
     else:
         L.append(f"  const rootRef = useRef{refann}(null);")
         L.append(_LANDING_EFFECT)
         L.append("  return (")
-        L.append('    <div ref={rootRef}>')
+        L.append('    <main ref={rootRef}>')
+        L.append(h1_jsx)
         if nav_tag:
             L.append(f"      <{nav_tag} />")
         L.append(f"      <Stage width={{{W}}} height={{{H}}}>")
@@ -1140,13 +1210,14 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         for i, sec in enumerate(secs):
             y0, hb = bands[i]
             rev = "" if i == 0 else " reveal"
-            L.append(f'        <div className="landing-sec{rev}" data-sec="{i}" style={{{{ position: "absolute", '
-                     f'left: 0, top: {y0}, width: {W}, height: {hb} }}}}>')
+            _al = json.dumps(sec.get("comp") or f"Section {i + 1}", ensure_ascii=False)
+            L.append(f'        <section aria-label={{{_al}}} className="landing-sec{rev} absolute left-0 top-[{y0}px] '
+                     f'w-[{W}px] h-[{hb}px]" data-sec="{i}">')
             L.append(f"          <{sec['comp']} {{...props}} />")
-            L.append("        </div>")
+            L.append("        </section>")
         L.append("      </Stage>")
         L.append(modal_block)
-        L += ["    </div>", "  );", "}", ""]
+        L += ["    </main>", "  );", "}", ""]
     return "\n".join(L)
 
 
@@ -1279,8 +1350,27 @@ def _api_hook(lang):
 
 # ---------- REACT (Vite) ----------
 
+def _seo_into_board(layout, board):
+    """Gan tieu de/mo ta (text goc, dung hoa thuong) + danh dau LCP cho board."""
+    texts = _seo_texts_from_layout(layout)
+    if texts:
+        board.setdefault("page_title", texts[0])
+        board.setdefault("page_desc", " · ".join(texts[:6]))
+    _mark_lcp(board)
+
+
+def _lcp_src(board):
+    """Duong dan anh LCP (de preload). None neu khong co."""
+    for it in list(board.get("backgrounds", [])) + [l for s in board.get("sections", [])[:1]
+                                                     for l in s.get("flat", [])]:
+        if it.get("lcp"):
+            return it.get("src")
+    return None
+
+
 def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None):
     feats = feats or {}
+    _seo_into_board(layout, board)
     proj = Path(out_dir) / "react-app"
     ext = _ext(lang)
     src = proj / "src"
@@ -1327,12 +1417,27 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
     (src / f"main.{ext}").write_text(
         'import { createRoot } from "react-dom/client";\nimport App from "./App";\n\n'
         f'createRoot(document.getElementById("root"){nn}).render(<App />);\n', encoding="utf-8")
+    import html as _h
+    _t = _h.escape(_page_title(board), quote=True)
+    _d = _h.escape(_page_desc(board), quote=True)
+    _fav = ("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+            "<text y='.9em' font-size='90'>%F0%9F%8E%AE</text></svg>")
+    _lcp = _lcp_src(board)
+    _preload = f'<link rel="preload" as="image" href="{_h.escape(_lcp, quote=True)}" fetchpriority="high"/>\n' if _lcp else ""
     (proj / "index.html").write_text(
         '<!doctype html>\n<html lang="vi">\n<head>\n<meta charset="UTF-8"/>\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1.0"/>\n'
-        f'<title>{layout.get("source","Landing")}</title>\n</head>\n<body>\n'
+        f'<title>{_t}</title>\n'
+        f'<meta name="description" content="{_d}"/>\n'
+        '<meta property="og:type" content="website"/>\n'
+        f'<meta property="og:title" content="{_t}"/>\n'
+        f'<meta property="og:description" content="{_d}"/>\n'
+        '<meta name="theme-color" content="#0b1120"/>\n'
+        f'<link rel="icon" href="{_fav}"/>\n{_preload}</head>\n<body>\n'
         f'<div id="root"></div>\n<script type="module" src="/src/main.{ext}"></script>\n</body>\n</html>\n',
         encoding="utf-8")
+    (proj / "public").mkdir(exist_ok=True)
+    (proj / "public" / "robots.txt").write_text("User-agent: *\nAllow: /\n", encoding="utf-8")
     (proj / "vite.config.js").write_text(
         'import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\n\n'
         'export default defineConfig({ plugins: [react()] });\n', encoding="utf-8")
@@ -1361,6 +1466,7 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
 
 def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None):
     feats = feats or {}
+    _seo_into_board(layout, board)
     proj = Path(out_dir) / "next-app"
     ext = _ext(lang)
     # DON app/ + components/ cu (tranh lan .jsx/.tsx -> import khong duoi nap nham ban cu)
@@ -1387,11 +1493,20 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None)
         (proj / ".env").write_text(_gen_env(client=True), encoding="utf-8")
 
     (proj / "app" / "globals.css").write_text(CSS_TW, encoding="utf-8")
+    _mt = _ann(lang, "import('next').Metadata")
+    _meta = json.dumps({
+        "title": _page_title(board),
+        "description": _page_desc(board),
+        "openGraph": {"title": _page_title(board), "description": _page_desc(board), "type": "website"},
+    }, ensure_ascii=False, indent=2)
     (proj / "app" / f"layout.{ext}").write_text(
         'import "./globals.css";\n\n'
-        f'export const metadata = {{ title: "{layout.get("source","Landing")}" }};\n\n'
+        f'export const metadata{_mt} = {_meta};\n\n'
+        'export const viewport = { themeColor: "#0b1120" };\n\n'
         f'export default function RootLayout({{ children }}{_ann(lang, "{ children: React.ReactNode }")}) {{\n'
         '  return (<html lang="vi"><body>{children}</body></html>);\n}\n', encoding="utf-8")
+    (proj / "public").mkdir(exist_ok=True)
+    (proj / "public" / "robots.txt").write_text("User-agent: *\nAllow: /\n", encoding="utf-8")
     imp = [f'import Landing from "../components/landing/{board["landing_name"]}";']
     fluid = feats.get("fluid") and not mobile
     if mobile:
