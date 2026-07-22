@@ -41,7 +41,9 @@ from .sectionize import is_background
 # fmt: 'webp' (nhe, mac dinh) hoac 'png' (goc, net nhat, nang).
 # webp_quality: chat luong lossy cho anh lon (nen/nhan vat).
 # webp_lossless_max: anh nho hon dien tich nay -> WEBP LOSSLESS (chu/icon/logo cang sac).
-_ASSET_CFG = {"fmt": "webp", "quality": 92, "lossless_max": 300000}
+# trim: cat le trong suot theo kenh alpha -> bbox khop dung pixel that (chinh xac hon).
+# trim_thr: alpha <= nguong nay coi nhu trong suot (bo bong/glow rat mo o mep gay lech).
+_ASSET_CFG = {"fmt": "webp", "quality": 92, "lossless_max": 300000, "trim": True, "trim_thr": 8}
 
 
 def _apply_asset_cfg(asset_fmt=None, webp_quality=None, webp_lossless_max=None):
@@ -50,7 +52,29 @@ def _apply_asset_cfg(asset_fmt=None, webp_quality=None, webp_lossless_max=None):
     q = int(webp_quality if webp_quality is not None else os.environ.get("PSD2HTML_WEBP_QUALITY", "92"))
     lm = int(webp_lossless_max if webp_lossless_max is not None
              else os.environ.get("PSD2HTML_WEBP_LOSSLESS_MAX", "300000"))
-    _ASSET_CFG.update(fmt="png" if fmt == "png" else "webp", quality=q, lossless_max=lm)
+    trim = os.environ.get("PSD2HTML_TRIM", "1") not in ("0", "false", "no")
+    thr = int(os.environ.get("PSD2HTML_TRIM_THR", "8"))
+    _ASSET_CFG.update(fmt="png" if fmt == "png" else "webp", quality=q, lossless_max=lm,
+                      trim=trim, trim_thr=thr)
+
+
+def _trim_alpha(img):
+    """Cat le trong suot theo alpha (bo pixel alpha <= trim_thr o vien). Tra ve
+    (anh_da_cat, dx, dy) - dx/dy la lech goc trai-tren de bu vao bbox. Neu anh rong
+    hoan toan -> (None, 0, 0). Khong doi -> (img, 0, 0)."""
+    try:
+        alpha = img.getchannel("A")
+        thr = _ASSET_CFG.get("trim_thr", 0)
+        if thr > 0:
+            alpha = alpha.point(lambda a: 255 if a > thr else 0)
+        box = alpha.getbbox()
+        if box is None:
+            return None, 0, 0
+        if box == (0, 0, img.width, img.height):
+            return img, 0, 0
+        return img.crop(box), box[0], box[1]
+    except Exception:
+        return img, 0, 0
 
 
 def _save_asset(img, assets_dir, lid):
@@ -228,6 +252,58 @@ def _mostly_white(img, thr=0.9):
         return False
 
 
+# Cac 'kind' cua LAYER DIEU CHINH (adjustment) - chi chinh mau layer duoi, KHONG co
+# noi dung that. psd-tools doi khi render chung ra 1 mang den/phang -> can thay bang
+# crop composite tong (fix bug hero den). Layer pixel/type/shape THUONG khong bao gio
+# bi thay (giu composite rieng) -> khoi trang, lop phu den 65%, gradient... deu dung.
+_ADJUSTMENT_KINDS = {
+    "exposure", "brightnesscontrast", "colorlookup", "blackandwhite", "curves",
+    "levels", "huesaturation", "colorbalance", "gradientmap", "photofilter",
+    "channelmixer", "invert", "posterize", "threshold", "selectivecolor", "vibrance",
+}
+
+
+def _is_adjustment_kind(kind):
+    return (kind or "") in _ADJUSTMENT_KINDS
+
+
+def _is_uniform(img, cthr=6.0, athr=24):
+    """Composite rieng gan nhu MOT MAU PHANG DEU (mau + alpha DEU) tren vung DAC?
+    -> layer adjustment/fill 'suy bien' (khong phai anh that). Yeu cau CA mau CA alpha
+    deu: gradient (vd Layer 837 den) co alpha ramp -> alpha std cao -> False; khoi TRANG
+    co mau bien thien -> False; nen city bien thien -> False. Chi fill/adjustment phang
+    that (mau + alpha deu) moi True -> thay bang crop composite tong (fix bug hero den)."""
+    try:
+        import numpy as np
+        a = np.asarray(img.convert("RGBA"))
+        op = a[..., 3] > 16
+        if op.sum() < 8:
+            return False
+        rgb = a[..., :3][op]
+        al = a[..., 3][op]
+        return float(rgb.std(axis=0).mean()) < cthr and float(al.std()) < athr
+    except Exception:
+        return False
+
+
+def _is_flat(img, thr=6.0, bright_thr=40):
+    """Vung DAC cua composite rieng gan nhu 1 MAU PHANG VA TOI (near-black)?
+    -> layer thuc chat la 'shape' chua duoc to mau (hieu ung khong render ra) -> can
+    lay mau tu composite tong. LUU Y phai TOI: khoi TRANG cung it bien thien mau nhung
+    khong toi -> KHONG coi la flat -> giu composite rieng (dung mau that, khong dinh hero).
+    Anh that co gradient/hoa tiet -> khong phang -> giu composite rieng."""
+    try:
+        import numpy as np
+        a = np.asarray(img.convert("RGBA"))
+        op = a[..., 3] > 16
+        if op.sum() < 8:
+            return False
+        rgb = a[..., :3][op]
+        return float(rgb.std(axis=0).mean()) < thr and float(rgb.mean()) < bright_thr
+    except Exception:
+        return False
+
+
 def _mostly_dark(img, thr=0.92):
     """
     Vung crop co gan nhu TOAN pixel den (trong so cac pixel DAC) khong (>thr).
@@ -240,6 +316,11 @@ def _mostly_dark(img, thr=0.92):
         alpha = a[..., 3]
         opaque = alpha > 8
         if opaque.mean() < 0.5:      # phan lon trong suot -> khong coi la nen den
+            return False
+        # LOP GRADIENT/OVERLAY that (vd: mo dan xuong den o day) co alpha BIEN THIEN
+        # (ramp) -> KHONG phai fill suy bien. Fill/adjustment loi thi alpha phang (~255).
+        # Chi coi la 'nen den suy bien' khi alpha gan nhu DONG DEU.
+        if float(alpha[opaque].std()) > 24:
             return False
         near_black = (a[..., :3].max(axis=2) < 16) & opaque
         return near_black.sum() / max(1, opaque.sum()) >= thr
@@ -295,17 +376,19 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
         if sub.kind == "type":
             node["text"] = _extract_text_style(sub)
 
-        # Anh de xuat: mac dinh la composite rieng cua layer.
+        # Anh de xuat: MAC DINH dung composite RIENG cua layer. psd-tools da render
+        # san layer style (gradient/overlay/glow) VAO composite rieng nay -> chinh xac,
+        # KHONG dinh noi dung layer khac (m9 layer bi che se dinh hero neu lay tu composite tong)
+        # va KHONG bi blend 2 lan (blend mode dc ap lai bang CSS).
         export_img = img
 
-        # Voi layer FOREGROUND: lay MAU tu composite tong (dung layer style:
-        # gradient overlay, vien, glow...) + ALPHA tu layer -> chu/anh dung mau.
-        # (Layer nen giu composite rieng vi crop tu tong se dinh ca foreground.)
-        # Layer thuoc menu overlay: dung composite RIENG (real_comp da loai chung ra).
+        # CHI khi composite rieng bi 'PHANG' (1 mau, vd shape chua duoc style render) moi
+        # lay mau tu composite tong (giu ALPHA cua layer). Menu overlay giu composite rieng.
         b = node["bbox"]
         is_overlay = overlay is not None and id(sub) in overlay
         if (real_comp is not None and img is not None
-                and not is_background(node, cw, ch) and not is_overlay):
+                and not is_background(node, cw, ch) and not is_overlay
+                and _is_flat(img)):
             try:
                 crop = real_comp.crop((b["x"], b["y"], b["x"] + b["width"], b["y"] + b["height"]))
                 crop = crop.convert("RGBA")
@@ -318,13 +401,14 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
                     export_img = crop
             except Exception:
                 export_img = img
-        # Layer NEN: mac dinh giu composite rieng. Nhung neu composite rieng SUY BIEN
-        # (den/trang/rong) -> day thuc chat la lop dieu chinh/fill da bake vao composite
-        # tong; neu de opaque no se CHE ca trang (bug hero den). Thay bang crop tu
-        # composite tong (mau that), bo blend/opacity vi da la anh da render.
+        # Layer DIEU CHINH (adjustment: colorlookup/exposure/brightness...) chi chinh mau
+        # layer duoi, khong co noi dung. psd-tools doi khi render ra mot mang DEN PHANG DAC
+        # -> neu de nguyen se CHE ca trang (bug hero den). Chi khi DO: thay bang crop composite
+        # tong. Layer PIXEL/type/shape THUONG (lop phu den 65%, khoi, gradient) KHONG bao gio
+        # vao day -> luon giu composite rieng (dung noi dung + do mo + blend qua CSS).
         elif (real_comp is not None and img is not None
-              and is_background(node, cw, ch) and not is_overlay
-              and (_is_blank(img) or _mostly_white(img) or _mostly_dark(img))):
+              and _is_adjustment_kind(sub.kind) and not is_overlay
+              and _is_uniform(img)):
             try:
                 crop = real_comp.crop((b["x"], b["y"], b["x"] + b["width"], b["y"] + b["height"])).convert("RGBA")
                 if not (_is_blank(crop) or _mostly_white(crop)):
@@ -354,11 +438,27 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
                 except Exception:
                     pass
 
+        # TRIM: cat le trong suot -> bbox = dung vung pixel NHIN THAY (giam lech,
+        # nhat la layer chu co leading/ascent dem quanh). Dời x/y dung luong da cat
+        # nen vi tri hien thi KHONG doi, chi chinh xac hon.
+        if export_img is not None and not is_background(node, cw, ch) and _ASSET_CFG.get("trim", True):
+            timg, dx, dy = _trim_alpha(export_img)
+            if timg is None:
+                export_img = None            # layer trong suot hoan toan -> bo
+            elif dx or dy or timg.size != export_img.size:
+                export_img = timg
+                nb = node["bbox"]
+                node["bbox"] = {"x": nb["x"] + dx, "y": nb["y"] + dy,
+                                "width": timg.width, "height": timg.height}
+
         # Xuat asset cho MOI layer ve duoc (ke ca layer chu) - mac dinh WebP.
         if export_img is not None:
             try:
                 name = _save_asset(export_img, assets_dir, lid)
                 node["asset"] = f"assets/{name}"
+                # composite() DA nuong opacity cua layer vao ALPHA -> KHONG ap lai qua CSS
+                # (neu khong se mo GAP DOI, vd lop phu den 65%). Alpha da mang do mo that.
+                node["opacity"] = 1.0
             except Exception:
                 pass
 
