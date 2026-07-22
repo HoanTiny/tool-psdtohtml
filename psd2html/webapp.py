@@ -18,6 +18,9 @@ import shutil
 import threading
 import zipfile
 import json
+import socket
+import atexit
+import subprocess
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory, send_file, abort
@@ -539,6 +542,141 @@ def _run_preview(job_id, swiper, disabled_d, disabled_m):
         job["trace"] = traceback.format_exc()[-1500:]
 
 
+# ============ BUILD + XEM TRUOC REACT/NEXT (npm) ============
+#
+# react/next KHONG the xem truoc bang HTML thuan (can bundler). Nut "Build & Xem
+# truoc" se: npm install (neu chua co node_modules) -> npm run build -> chay server
+# tinh (vite preview / next start) tren 1 cong rieng, roi frontend nhung iframe tro
+# thang vao http://127.0.0.1:<cong> (giu nguyen duong dan tuyet doi /assets/...).
+#
+# Moi job giu 1 tien trinh server; build lai se kill cai cu truoc.
+PREVIEW_SERVERS = {}   # job_id -> {"proc": Popen, "port": int, "fmt": str}
+_NPM = shutil.which("npm") or "npm"
+
+
+def _free_port():
+    """Xin 1 cong TCP dang ranh tu OS (tranh dung trung)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _port_alive(port, timeout=0.5):
+    """True neu co ai dang lang nghe tren cong (server da san sang)."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _kill_preview(job_id):
+    """Dung tien trinh server xem truoc cua job (neu dang chay)."""
+    info = PREVIEW_SERVERS.pop(job_id, None)
+    if not info:
+        return
+    proc = info.get("proc")
+    if proc and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def _kill_all_previews():
+    for jid in list(PREVIEW_SERVERS):
+        _kill_preview(jid)
+
+
+atexit.register(_kill_all_previews)
+
+
+def _proj_dir(job_id, fmt):
+    out = JOBS_DIR / job_id / "out"
+    return out / ("next-app" if fmt == "next" else "react-app")
+
+
+def _npm(args, cwd, timeout=None):
+    """Chay npm dong bo, tra (ok, log). Windows: npm la .cmd -> can shell tren mot
+    so cau hinh; dung duong dan da resolve + shell=False cho on dinh."""
+    try:
+        r = subprocess.run([_NPM, *args], cwd=str(cwd), capture_output=True,
+                           text=True, timeout=timeout,
+                           shell=(_os.name == "nt" and _NPM == "npm"))
+        log = (r.stdout or "") + (r.stderr or "")
+        return r.returncode == 0, log[-3000:]
+    except subprocess.TimeoutExpired:
+        return False, f"npm {' '.join(args)}: qua thoi gian ({timeout}s)"
+    except Exception as e:
+        return False, f"npm {' '.join(args)}: {e}"
+
+
+def _run_build_preview(job_id, fmt):
+    """Build project react/next roi chay server tinh -> job['build'] mang tien do."""
+    job = jobs[job_id]
+    proj = _proj_dir(job_id, fmt)
+    b = {"status": "running", "step": "Chuan bi...", "url": None, "error": None, "log": None}
+    job["build"] = b
+    try:
+        if not (proj / "package.json").exists():
+            raise RuntimeError("Chua co project. Hay bam Xuat web (react/next) truoc.")
+
+        # 1) cai dependency (bo qua neu da co node_modules -> lan sau nhanh)
+        if not (proj / "node_modules").exists():
+            b["step"] = "npm install (lan dau, co the vai phut)..."
+            ok, log = _npm(["install", "--no-audit", "--no-fund"], proj, timeout=900)
+            if not ok:
+                raise RuntimeError("npm install that bai")
+            b["log"] = log
+
+        # 2) build tinh
+        b["step"] = "npm run build..."
+        ok, log = _npm(["run", "build"], proj, timeout=900)
+        b["log"] = log
+        if not ok:
+            raise RuntimeError("npm run build that bai")
+
+        # 3) chay server xem truoc tren cong rieng
+        _kill_preview(job_id)
+        port = _free_port()
+        if fmt == "next":
+            cmd = [_NPM, "start", "--", "-p", str(port)]
+        else:  # react / vite
+            cmd = [_NPM, "run", "preview", "--", "--port", str(port),
+                   "--strictPort", "--host", "127.0.0.1"]
+        b["step"] = f"Khoi dong server (cong {port})..."
+        proc = subprocess.Popen(cmd, cwd=str(proj),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                shell=(_os.name == "nt" and _NPM == "npm"))
+        PREVIEW_SERVERS[job_id] = {"proc": proc, "port": port, "fmt": fmt}
+
+        # cho server len (toi da ~40s)
+        for _ in range(80):
+            if proc.poll() is not None:
+                raise RuntimeError("Server xem truoc thoat som (xem log build).")
+            if _port_alive(port):
+                break
+            import time
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("Server xem truoc khong phan hoi kip.")
+
+        b["url"] = f"http://127.0.0.1:{port}/"
+        b["step"] = "San sang"
+        b["status"] = "done"
+    except Exception as e:
+        import traceback
+        b["status"] = "error"
+        b["error"] = f"{e}"
+        b["log"] = (b.get("log") or "") + "\n" + traceback.format_exc()[-800:]
+
+
 def _used_asset_names(vdir):
     """Ten cac file asset THUC SU dung trong layout.json da loc (bo layer an + thanh
     vien da gop). Dung de KHONG dong goi anh thua vao source web."""
@@ -671,6 +809,24 @@ def export():
     threading.Thread(target=_run_export,
                      args=(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m),
                      daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/build_preview", methods=["POST"])
+def build_preview():
+    """Build project react/next (npm) roi chay server xem truoc. Chay nen; frontend
+    doc tien do qua /status (truong 'build')."""
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job khong ton tai. Hay phan tich lai."}), 400
+    fmt = job.get("format")
+    if fmt not in ("react", "next"):
+        return jsonify({"error": "Chi build duoc project react/next. Hay Xuat web truoc."}), 400
+    if not (_proj_dir(job_id, fmt) / "package.json").exists():
+        return jsonify({"error": "Chua co project. Hay bam Xuat web (react/next) truoc."}), 400
+    threading.Thread(target=_run_build_preview, args=(job_id, fmt), daemon=True).start()
     return jsonify({"job_id": job_id})
 
 
@@ -1694,9 +1850,63 @@ function showResult(s){
   let html='<b style="color:#4ade80;font-size:16px">\\u2705 Xuất thành công!</b> ';
   if(s.download) html+='<a class="dl" href="'+s.download+'">\\u2B07 Tải ZIP kết quả</a>';
   if(s.preview){ html+='<iframe src="'+s.preview+'?t='+Date.now()+'"></iframe>'; }
-  else if(s.files && s.files.length){ html+='<div class="files">'+s.files.join("<br>")+'</div>'
-    +'<p style="color:#94a3b8;font-size:13px">Đã tạo project React/Next. Giải nén ZIP rồi chạy: <code>npm install &amp;&amp; npm run dev</code></p>'; }
+  else if(s.files && s.files.length){
+    const isProj=(s.format==="react"||s.format==="next");
+    if(isProj){
+      html+='<button id="goBuild" class="dl" style="border:0;cursor:pointer">\\uD83D\\uDD28 Build &amp; Xem trước (npm)</button>';
+      html+='<div id="buildBox" style="display:none;margin-top:10px">'
+          +'<div id="buildBar"><div style="color:var(--muted);font-size:13px" id="buildStep"></div><div class="bar"><i></i></div></div>'
+          +'<iframe id="buildFrame" style="display:none"></iframe>'
+          +'<a id="buildOpen" style="display:none" class="dl" target="_blank">\\u2197 Mở tab mới</a>'
+          +'<pre id="buildLog" class="err" style="display:none;max-height:180px;overflow:auto"></pre>'
+          +'</div>';
+    }
+    html+='<div class="files">'+s.files.join("<br>")+'</div>'
+      +'<p style="color:#94a3b8;font-size:13px">Đã tạo project '+(s.format==="next"?"Next.js":"React")+'. '
+      +(isProj?'Bấm <b>Build &amp; Xem trước</b> để chạy ngay, hoặc giải nén ZIP rồi ':'Giải nén ZIP rồi ')
+      +'chạy: <code>npm install &amp;&amp; npm run dev</code></p>';
+  }
   result.innerHTML=html;
+  const gb=document.getElementById("goBuild");
+  if(gb) gb.onclick=startBuild;
+}
+
+let buildUrl=null;
+async function startBuild(){
+  const gb=document.getElementById("goBuild");
+  const box=document.getElementById("buildBox"), bar=document.getElementById("buildBar"),
+        step=document.getElementById("buildStep"), frame=document.getElementById("buildFrame"),
+        openBtn=document.getElementById("buildOpen"), log=document.getElementById("buildLog");
+  gb.disabled=true; box.style.display="block"; bar.style.display="block";
+  frame.style.display="none"; openBtn.style.display="none"; log.style.display="none";
+  step.textContent="Đang gửi yêu cầu…";
+  let r;
+  try{ r=await (await fetch("/build_preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job_id:JOB})})).json(); }
+  catch(e){ step.textContent="Lỗi: "+e; gb.disabled=false; return; }
+  if(r.error){ step.textContent="Lỗi: "+r.error; gb.disabled=false; return; }
+  pollBuild();
+}
+async function pollBuild(){
+  const gb=document.getElementById("goBuild");
+  const bar=document.getElementById("buildBar"), step=document.getElementById("buildStep"),
+        frame=document.getElementById("buildFrame"), openBtn=document.getElementById("buildOpen"),
+        log=document.getElementById("buildLog");
+  let s; try{ s=await (await fetch("/status/"+JOB)).json(); }
+  catch(e){ setTimeout(pollBuild,1500); return; }
+  const b=s.build||{};
+  step.textContent=b.step||"Đang xử lý…";
+  if(b.status==="done" && b.url){
+    buildUrl=b.url; bar.style.display="none";
+    frame.style.display="block"; frame.src=buildUrl;
+    openBtn.style.display="inline-block"; openBtn.href=buildUrl;
+    if(gb) gb.disabled=false; return;
+  }
+  if(b.status==="error"){ bar.style.display="none";
+    if(b.log){ log.style.display="block"; log.textContent=(b.error||"")+"\\n\\n"+b.log; }
+    else step.textContent="Lỗi: "+(b.error||"");
+    if(gb) gb.disabled=false; return;
+  }
+  setTimeout(pollBuild,1500);
 }
 </script>
 </body></html>"""
