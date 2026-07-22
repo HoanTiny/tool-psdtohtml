@@ -115,6 +115,9 @@ def render(out_dir, swiper=False):
         f" margin: 0 auto; transform-origin: top left; overflow: hidden; }}",
         ".stage .node { position: absolute; display: block; }",
         ".stage a.node > img { width: 100%; height: 100%; display: block; }",
+        # CHU THAT: the text (a/div) - bo gach chan, giu mau tu inline style
+        ".stage .txt { text-decoration: none; overflow: hidden; padding: 2px 4px; }",
+        ".stage a.txt { color: inherit; }",
         # nut bam: con tro + hieu ung hover nhe
         ".stage a.node { cursor: pointer; transition: filter .15s ease, transform .15s ease; }",
         ".stage a.node:hover { filter: brightness(1.08); }",
@@ -125,21 +128,46 @@ def render(out_dir, swiper=False):
     ]
 
     def _item_html_css(l, top, lazy=True):
-        """Tra ve (html, css_rule) cho 1 layer, top tinh theo container chua no."""
+        """Tra ve (html, css_rule) cho 1 layer, top tinh theo container chua no.
+        Ho tro: CHU THAT (text.asText -> the text HTML), LINK/NUT (link.url/action/button),
+        ALT (l['alt']) - deu tu editor (edits.json)."""
         b = l["bbox"]
         cls = l["id"]
-        alt = l["text"]["content"] if (l.get("text") and l["text"].get("content")) else l.get("name", "")
-        alt = html_mod.escape(_norm(alt), quote=True)
+        txt = l.get("text") or {}
+        link = l.get("link") or {}
+        # alt: uu tien alt nguoi dung dat -> noi dung chu -> ten layer.
+        # GIU nguyen hoa/thuong (tot cho SEO), chi bo xuong dong + trim.
+        alt_src = l.get("alt") or (txt.get("content") if txt.get("content") else l.get("name", ""))
+        alt = html_mod.escape((alt_src or "").replace("\r", " ").replace("\n", " ").strip(), quote=True)
+        as_text = bool(txt.get("asText") and txt.get("content"))
+
         rule = (f".stage .{cls}{{left:{b['x']}px;top:{top}px;"
                 f"width:{b['width']}px;height:{b['height']}px;opacity:{l.get('opacity', 1)};")
         if l.get("blend"):
             rule += f"mix-blend-mode:{l['blend']};"
+        if as_text:  # chu that: canh giua khung, size/mau tu PSD (hoac chinh sua)
+            fs = txt.get("size") or 20
+            col = txt.get("color") or "#ffffff"
+            rule += (f"display:flex;align-items:center;justify-content:center;text-align:center;"
+                     f"font-size:{fs}px;color:{col};line-height:1.15;white-space:pre-wrap;font-weight:700;")
         rule += "}"
-        # Section dau (above-the-fold) tai NGAY; section sau LAZY (chi tai khi cuon toi).
+
         load = ' loading="lazy"' if lazy else ""
-        if _is_interactive(l):
-            act = _action_of(l)
-            h = (f'<a class="node hot {cls}" href="#" data-action="{act}" title="{alt}">'
+        # nut/link: nguoi dung danh dau (button), co url/action, hoac keyword
+        is_btn = bool(link.get("button") or link.get("url") or link.get("action")) or _is_interactive(l)
+        act = link.get("action") or _action_of(l)
+        href = link.get("url") or "#"
+        tgt = ' target="_blank" rel="noopener"' if link.get("url") else ""
+
+        if as_text:
+            content = html_mod.escape(txt.get("content") or "", quote=False)
+            if is_btn:
+                h = (f'<a class="node hot txt {cls}" href="{href}" data-action="{act}"{tgt} '
+                     f'title="{alt}">{content}</a>')
+            else:
+                h = f'<div class="node txt {cls}">{content}</div>'
+        elif is_btn:
+            h = (f'<a class="node hot {cls}" href="{href}" data-action="{act}"{tgt} title="{alt}">'
                  f'<img src="{l["asset"]}" alt="{alt}"{load} decoding="async"></a>')
         else:
             h = f'<img class="node {cls}" src="{l["asset"]}" alt="{alt}"{load} decoding="async">'
@@ -261,20 +289,30 @@ def render(out_dir, swiper=False):
                   '<h3 id="m-title">Thông báo</h3><p id="m-desc"></p>'
                   '<button class="mbtn" data-close>Đóng</button></div></div>')
 
+    # Cau hinh LINKS: gom action->url do nguoi dung gan trong editor (edits.link).
+    link_cfg = {}
+    for l in layers:
+        lk = l.get("link") or {}
+        if lk.get("action") and lk.get("url"):
+            link_cfg[lk["action"]] = lk["url"]
+
     # JS chung: cau hinh link, modal, nut bam (dung .replace de tranh escape f-string)
     common_ui = r'''
-  var LINKS = { download:"", login:"", register:"", topup:"", gift:"", rules:"", history:"", social:"", check:"" };
+  var LINKS = Object.assign({ download:"", login:"", register:"", topup:"", gift:"", rules:"", history:"", social:"", check:"" }, __LINKS__);
   var LABELS = { download:"Tải game", login:"Đăng nhập", register:"Đăng ký", topup:"Nạp", gift:"Nhận quà", rules:"Thể lệ", history:"Lịch sử", social:"Facebook", check:"Kiểm tra" };
   var modal=document.getElementById('modal'), mTitle=document.getElementById('m-title'), mDesc=document.getElementById('m-desc');
   function openModal(t,d){ mTitle.textContent=t; mDesc.textContent=d; modal.classList.add('show'); }
   function closeModal(){ modal.classList.remove('show'); }
   modal.addEventListener('click',function(e){ if(e.target===modal||e.target.hasAttribute('data-close')) closeModal(); });
   document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeModal(); });
-  document.querySelectorAll('.hot').forEach(function(a){ a.addEventListener('click',function(e){ e.preventDefault();
+  document.querySelectorAll('.hot').forEach(function(a){ a.addEventListener('click',function(e){
+    var href=a.getAttribute('href');
+    if(href && href!=='#'){ return; }                 // co link that -> dieu huong tu nhien
+    e.preventDefault();
     var act=a.getAttribute('data-action')||'other', url=LINKS[act];
     if(url){ window.open(url,'_blank'); return; }
     openModal(LABELS[act]||'Thông báo','Chức năng "'+(LABELS[act]||act)+'": điền URL vào LINKS.'+act+' hoặc gọi API tại đây.'); }); });
-'''
+'''.replace("__LINKS__", json.dumps(link_cfg, ensure_ascii=False))
     fixed_scale = ("var fstage=document.querySelector('.fixed-stage'); "
                    "if(fstage) fstage.style.transform='scale('+s+')';")
 

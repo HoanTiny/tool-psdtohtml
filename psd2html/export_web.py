@@ -277,12 +277,22 @@ def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id):
         cx, cy = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
         if not (ax <= cx < ax + ab_bbox["width"] and ay <= cy < ay + ab_bbox["height"]):
             continue
+        lk = l.get("link") or {}
+        tx = l.get("text") or {}
+        as_text = bool(tx.get("asText") and tx.get("content"))
+        is_btn = bool(lk.get("button") or lk.get("url") or lk.get("action")) or _is_interactive(l)
         item = {"id": l["id"], "src": _src(l["asset"], asset_dir),
                 "x": b["x"] - ax, "y": b["y"] - ay, "w": b["width"], "h": b["height"],
                 "o": l.get("opacity", 1), "blend": l.get("blend"),
-                "alt": _alt_of(l), "href": "#" if _is_interactive(l) else None,
-                "act": _action_of(l) if _is_interactive(l) else None,
+                "alt": (l.get("alt") or _alt_of(l)),
+                "href": (lk.get("url") or ("#" if is_btn else None)),
+                "act": (lk.get("action") or (_action_of(l) if is_btn else None)),
                 "t": l.get("kind") == "type"}
+        if as_text:   # CHU THAT: render text node thay vi img (tru cot 2)
+            item["asText"] = True
+            item["text"] = tx.get("content")
+            item["tsize"] = tx.get("size")
+            item["tcolor"] = tx.get("color")
         if toggle_id and l["id"] == toggle_id:
             item["toggle"] = True
             item["href"] = None
@@ -404,7 +414,8 @@ def _gen_types():
         "export interface LayerItem {\n"
         "  id: string; src: string; x: number; y: number; w: number; h: number;\n"
         "  o: number; blend?: string | null; alt?: string;\n"
-        "  href?: string | null; act?: string | null; menu?: boolean; toggle?: boolean;\n}\n\n"
+        "  href?: string | null; act?: string | null; menu?: boolean; toggle?: boolean;\n"
+        "  asText?: boolean; text?: string; tsize?: number; tcolor?: string;\n}\n\n"
         "export interface FixedItem {\n"
         "  src: string; x: number; y: number; w: number; h: number;\n"
         "  o: number; blend?: string | null; alt?: string; href?: string | null; nav?: number | null;\n}\n\n"
@@ -572,10 +583,22 @@ def _gen_layer(lang, client):
            if lang == "ts" else "{ l, menuOpen, onToggleMenu }")
     style_ty = _ann(lang, "React.CSSProperties")
     react_imp = 'import type React from "react";\n' if lang == "ts" else ""
+    anyc = ' as any' if lang == "ts" else ''
     return head + react_imp + imp + (
-        f"// 1 lop anh (img); tu xu ly nut menu (toggle) va an/hien menu.\n"
+        f"// 1 lop: anh (img) HOAC chu that (text). Tu xu ly nut menu (toggle) + link ngoai.\n"
         f"export default function Layer({sig}) {{\n"
-        f"  const style{style_ty} = {{ left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o, mixBlendMode: (l.blend || undefined){_ann(lang,'any') and ' as any' or ''} }};\n"
+        f"  const ext = !!(l.href && /^https?:/.test(l.href));\n"
+        f"  const style{style_ty} = {{ left: l.x, top: l.y, width: l.w, height: l.h, opacity: l.o, mixBlendMode: (l.blend || undefined){anyc} }};\n"
+        "  if (l.asText) {\n"
+        f"    const ts{style_ty} = {{ ...style, display: 'flex', alignItems: 'center', justifyContent: 'center',\n"
+        "      textAlign: 'center', fontWeight: 700, lineHeight: 1.15, whiteSpace: 'pre-wrap', overflow: 'hidden',\n"
+        f"      fontSize: (l.tsize || 20), color: (l.tcolor || '#fff') }}{anyc};\n"
+        "    return l.href ? (\n"
+        '      <a href={l.href} data-action={l.act || "other"} target={ext ? "_blank" : undefined} rel={ext ? "noopener" : undefined}\n'
+        '        title={l.alt} className="hot absolute" style={ts}>{l.text}</a>\n'
+        "    ) : (\n"
+        '      <div className="absolute" style={ts}>{l.text}</div>\n'
+        "    );\n  }\n"
         "  if (l.toggle) {\n"
         "    return (\n"
         '      <button onClick={onToggleMenu} title={l.alt}\n'
@@ -584,7 +607,8 @@ def _gen_layer(lang, client):
         "      </button>\n    );\n  }\n"
         "  if (l.menu && !menuOpen) return null;\n"
         "  return l.href ? (\n"
-        '    <a href={l.href} data-action={l.act || "other"} title={l.alt} className="hot absolute block" style={style}>\n'
+        '    <a href={l.href} data-action={l.act || "other"} target={ext ? "_blank" : undefined} rel={ext ? "noopener" : undefined}\n'
+        '      title={l.alt} className="hot absolute block" style={style}>\n'
         '      <img src={l.src} alt={l.alt} className="block w-full h-full" loading="lazy" decoding="async" />\n'
         "    </a>\n  ) : (\n"
         '    <img src={l.src} alt={l.alt} className="absolute block" style={style} loading="lazy" decoding="async" />\n  );\n}\n')
@@ -601,6 +625,11 @@ def _flat_json(items):
             o["href"] = it["href"]
         if it.get("act"):
             o["act"] = it["act"]
+        if it.get("asText"):
+            o["asText"] = True
+            o["text"] = it.get("text")
+            o["tsize"] = it.get("tsize")
+            o["tcolor"] = it.get("tcolor")
         if it.get("menu"):
             o["menu"] = True
         if it.get("toggle"):
@@ -740,6 +769,8 @@ _LANDING_EFFECT = r'''  useEffect(() => {
     const onClick = (e) => {
       const a = e.target.closest(".hot");
       if (!a || !root.contains(a)) return;
+      const href = a.getAttribute("href");
+      if (href && href !== "#") return;   // link that -> dieu huong tu nhien
       e.preventDefault();
       const act = a.getAttribute("data-action") || "other";
       const url = LINKS[act];
@@ -804,7 +835,8 @@ _LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef
     deck.addEventListener("touchend", onTE);
     const navH = navs.map((n, i) => { const h = (e) => { e.preventDefault(); go(Math.min(i, N - 1)); };
       n.addEventListener("click", h); return { n, h }; });
-    const onClick = (e) => { const a = e.target.closest(".hot"); if (!a || !deck.contains(a)) return; e.preventDefault();
+    const onClick = (e) => { const a = e.target.closest(".hot"); if (!a || !deck.contains(a)) return;
+      const href = a.getAttribute("href"); if (href && href !== "#") return; e.preventDefault();
       const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
       if (url) { window.open(url, "_blank"); return; }
       openAction(act); };
@@ -833,7 +865,8 @@ _LANDING_SWIPERLIB_EFFECT = r'''  useEffect(() => {
     const navH = navs.map((n, i) => { const h = (e) => { e.preventDefault();
       if (swiperRef.current) swiperRef.current.slideTo(Math.min(i, N - 1)); };
       n.addEventListener("click", h); return { n, h }; });
-    const onClick = (e) => { const a = (e.target__ASH__).closest(".hot"); if (!a || !root.contains(a)) return; e.preventDefault();
+    const onClick = (e) => { const a = (e.target__ASH__).closest(".hot"); if (!a || !root.contains(a)) return;
+      const href = a.getAttribute("href"); if (href && href !== "#") return; e.preventDefault();
       const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
       if (url) { window.open(url, "_blank"); return; }
       openAction(act); };
