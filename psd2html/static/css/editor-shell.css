@@ -1,0 +1,311 @@
+/* Workspace editor toan man hinh. */
+:root{
+  --app-top:58px;
+  --app-status:38px;
+  --dock-left:300px;
+  --dock-right:360px;
+  --dock-bg:#101a2d;
+  --dock-head:#151f34;
+  --canvas-bg:#070c16;
+  --line-soft:#202d46;
+}
+
+body:has(#editor.show){overflow:hidden;background:#080e1b}
+body:has(#editor.show) .wrap{max-width:none;padding:0}
+body:has(#editor.show) .wrap>h1,
+body:has(#editor.show) .wrap>.sub,
+body:has(#editor.show) .wrap>.steps,
+body:has(#editor.show) #step1,
+body:has(#editor.show) #parsePanel{display:none!important}
+
+#editor.show{
+  position:fixed;
+  inset:0;
+  z-index:100;
+  display:grid;
+  grid-template-columns:var(--dock-left) minmax(420px,1fr) var(--dock-right);
+  grid-template-rows:var(--app-top) minmax(0,1fr) var(--app-status);
+  grid-template-areas:
+    "top top top"
+    "layers canvas inspector"
+    "status status status";
+  margin:0;
+  padding:0;
+  border:0;
+  border-radius:0;
+  background:#080e1b;
+  box-shadow:none;
+  overflow:hidden;
+}
+
+#editor.show .etool{
+  grid-area:top;
+  position:relative;
+  top:auto;
+  z-index:20;
+  min-width:0;
+  margin:0;
+  padding:9px 14px;
+  border:0;
+  border-bottom:1px solid var(--line-soft);
+  border-radius:0;
+  background:rgba(13,21,37,.98);
+  box-shadow:0 5px 22px rgba(0,0,0,.24);
+}
+#editor.show .etool .title{padding-right:12px;border-right:1px solid var(--line)}
+#editor.show .etool button{white-space:nowrap}
+#editor.show .hint{display:none}
+#editor.show .ed{display:contents}
+
+.dockHead{
+  min-height:52px;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:10px 12px;
+  border-bottom:1px solid var(--line-soft);
+  background:var(--dock-head);
+}
+.dockHead>div{display:flex;flex-direction:column;min-width:0}
+.dockHead b{font-size:13px;letter-spacing:.2px}
+.dockHead small{font-size:10.5px;color:var(--muted)}
+.dockBadge{
+  margin-left:auto;
+  padding:3px 7px;
+  border:1px solid #314363;
+  border-radius:5px;
+  color:#91a4c7;
+  font-size:9px;
+  font-weight:800;
+  letter-spacing:.7px;
+}
+
+#editor.show .layerDock{
+  grid-area:layers;
+  display:flex;
+  flex-direction:column;
+  min-width:0;
+  min-height:0;
+  overflow:hidden;
+  border-right:1px solid var(--line-soft);
+  background:var(--dock-bg);
+}
+#editor.show .layerDock .listhead{
+  flex:0 0 auto;
+  margin:0;
+  padding:10px;
+  border-bottom:1px solid var(--line-soft);
+}
+#editor.show .layerDock .search{border-radius:7px;background:#0b1424}
+#editor.show #secList{
+  flex:1;
+  min-height:0;
+  overflow:auto;
+  padding:8px;
+}
+#editor.show .sec{border:0;border-radius:7px;background:transparent}
+#editor.show .sec>h4{padding:8px;background:transparent}
+#editor.show .sec>h4:hover{background:var(--card2)}
+
+#editor.show .canvasDock{
+  grid-area:canvas;
+  position:relative;
+  top:auto;
+  min-width:0;
+  min-height:0;
+  max-height:none;
+  margin:0;
+  padding:0 20px 24px;
+  overflow:auto;
+  border:0;
+  border-radius:0;
+  background:
+    radial-gradient(circle at 50% 36%,rgba(39,61,100,.20),transparent 42%),
+    var(--canvas-bg);
+  scrollbar-color:#354766 #0b1220;
+}
+.canvasToolbar{
+  position:sticky;
+  top:0;
+  z-index:12;
+  height:44px;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin:0 -20px 14px;
+  padding:0 14px;
+  border-bottom:1px solid var(--line-soft);
+  color:var(--muted);
+  font-size:11px;
+  background:rgba(9,15,27,.94);
+  backdrop-filter:blur(8px);
+}
+.canvasToolbar .toolActive{
+  padding:6px 9px;
+  border:1px solid #34568a;
+  border-radius:6px;
+  color:#dbeafe;
+  background:#172b4c;
+}
+.canvasToolbar button{margin-left:auto}
+#editor.show .secNav{justify-content:center;margin:0 0 10px}
+#editor.show .pvtop{
+  max-width:1100px;
+  margin:0 auto 8px;
+  padding:6px 8px;
+  border:1px solid var(--line-soft);
+  border-radius:7px;
+  background:#0d1627;
+}
+#editor.show .stageClip{
+  width:max-content;
+  max-width:100%;
+  min-height:320px;
+  margin:auto;
+  border:1px solid #2c3d5c;
+  box-shadow:0 16px 50px rgba(0,0,0,.48);
+}
+
+#editor.show .rightDock{
+  grid-area:inspector;
+  min-width:0;
+  min-height:0;
+  overflow:auto;
+  border-left:1px solid var(--line-soft);
+  background:var(--dock-bg);
+  scrollbar-color:#354766 #0b1220;
+}
+#editor.show .rightDock>.dockHead{position:sticky;top:0;z-index:8}
+#editor.show .rightDock .acc{
+  margin:8px!important;
+  border-radius:8px;
+  background:#0d1728;
+}
+#editor.show .rightDock .acc>summary{padding:10px 11px;font-size:12.5px}
+#editor.show .rightDock .acc>summary span:not(.arw){display:none}
+#editor.show .rightDock .acc .body{padding:5px 10px 12px}
+#editor.show .rightDock .row{gap:8px;margin:10px 0}
+#editor.show .rightDock .fmt{gap:6px}
+#editor.show .rightDock .fmt label{padding:6px 8px;font-size:11.5px}
+#editor.show .rightDock #grpBar,
+#editor.show .rightDock #grpSug{margin:8px!important}
+#editor.show .rightDock .selPanel{margin:8px;border-radius:8px}
+.emptyInspector{
+  min-height:220px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:7px;
+  padding:28px;
+  color:var(--muted);
+  text-align:center;
+}
+.emptyInspector span{font-size:32px;color:#49617f}
+.emptyInspector b{font-size:13px;color:#becbe0}
+.emptyInspector small{max-width:250px;font-size:11px}
+.rightDock:has(#selPanel[style*="display: block"]) .emptyInspector{display:none}
+
+#editor.show .actionbar{
+  grid-area:status;
+  z-index:15;
+  min-width:0;
+  margin:0;
+  padding:5px 10px;
+  border-top:1px solid var(--line-soft);
+  background:#0c1423;
+}
+#editor.show .actionbar button{padding:5px 10px;font-size:11px}
+#editor.show .actionbar .chip{border:0;background:transparent}
+
+#editor.show #reviewBox{
+  position:fixed;
+  inset:72px 60px 52px;
+  z-index:80;
+  margin:0!important;
+  padding:14px;
+  overflow:auto;
+  border:1px solid #34496d;
+  border-radius:12px;
+  background:#0d1729;
+  box-shadow:0 28px 90px rgba(0,0,0,.72);
+}
+#exportPanel.show{
+  position:fixed;
+  right:18px;
+  bottom:52px;
+  z-index:220;
+  width:min(680px,calc(100vw - 36px));
+  max-height:70vh;
+  margin:0;
+  overflow:auto;
+  box-shadow:0 28px 90px rgba(0,0,0,.7);
+}
+
+@media(max-width:1180px){
+  :root{--dock-left:250px;--dock-right:320px}
+  #editor.show .etool .chip{display:none}
+}
+@media(max-width:920px){
+  #editor.show{
+    grid-template-columns:230px minmax(360px,1fr);
+    grid-template-areas:
+      "top top"
+      "layers canvas"
+      "status status";
+  }
+  #editor.show .rightDock{
+    position:fixed;
+    top:var(--app-top);
+    right:0;
+    bottom:var(--app-status);
+    z-index:40;
+    width:min(360px,92vw);
+    box-shadow:-18px 0 45px rgba(0,0,0,.48);
+  }
+}
+#editor.show.layersCollapsed{grid-template-columns:0 minmax(420px,1fr) var(--dock-right)}
+#editor.show.inspectorCollapsed{grid-template-columns:var(--dock-left) minmax(420px,1fr) 0}
+#editor.show.layersCollapsed.inspectorCollapsed{grid-template-columns:0 minmax(420px,1fr) 0}
+#editor.show.layersCollapsed .layerDock,
+#editor.show.inspectorCollapsed .rightDock{display:none}
+#editor.show .dockToggle.active{border-color:#4d7dc0;color:#dbeafe;background:#18335a}
+.canvasDock.spaceHeld{cursor:grab}
+.canvasDock.isPanning{cursor:grabbing;user-select:none}
+
+@media(max-width:920px){
+  #editor.show.layersCollapsed{grid-template-columns:0 minmax(360px,1fr)}
+  #editor.show.inspectorCollapsed .rightDock{display:none}
+}
+.statusItem{font-size:10.5px;color:#9fb0cb;padding:3px 8px;border-right:1px solid var(--line-soft)}
+#saveStatus.saveBusy{color:#fbbf24}
+#saveStatus.saveReady{color:#6ee7b7}
+.shortcutHint{color:#71829e;font-size:10px;white-space:nowrap}
+@media(max-width:760px){.shortcutHint{display:none}}
+#editor.show .rightDock{display:flex;flex-direction:column}
+#editor.show .rightDock>.dockHead{order:0;flex:0 0 auto}
+#editor.show .rightDock>#selPanel,
+#editor.show .rightDock>.emptyInspector{order:1;flex:0 0 auto}
+#editor.show .rightDock>#grpBar,
+#editor.show .rightDock>#grpSug{order:2;flex:0 0 auto}
+#editor.show .rightDock>#exportAcc{order:3;flex:0 0 auto}
+.dockResizer{display:none}
+#editor.show .dockResizer{position:absolute;top:var(--app-top);bottom:var(--app-status);z-index:35;display:block;width:7px;cursor:col-resize;background:transparent}
+#editor.show .dockResizer:hover,
+#editor.show .dockResizer.dragging{background:rgba(56,189,248,.5)}
+#editor.show .leftResizer{left:calc(var(--dock-left) - 3px)}
+#editor.show .rightResizer{right:calc(var(--dock-right) - 3px)}
+#editor.show.layersCollapsed .leftResizer,
+#editor.show.inspectorCollapsed .rightResizer{display:none}
+@media(max-width:920px){#editor.show .dockResizer{display:none}}
+#reviewBox .modalClose{border-color:#6f3340;color:#fecdd3;background:#2a151d}
+#reviewBox .modalClose:hover{border-color:#ef6078;background:#431c28}
+#exportPanel .panelCloseBar{position:sticky;top:-18px;z-index:10;display:flex;align-items:center;gap:12px;margin:-18px -18px 14px;padding:11px 12px 10px 16px;border-bottom:1px solid var(--line-soft);background:rgba(15,26,48,.98);backdrop-filter:blur(8px)}
+#exportPanel .panelCloseBar b{font-size:13px}
+#exportPanel .panelCloseBar .modalClose{margin-left:auto;border-color:#6f3340;color:#fecdd3;background:#2a151d}
+#exportPanel .panelCloseBar .modalClose:hover{border-color:#ef6078;background:#431c28}
+.historyControls{display:inline-flex;overflow:hidden;border:1px solid var(--line);border-radius:7px;background:#0b1525}
+#editor.show .historyControls button{min-width:32px;padding:6px 8px;border:0;border-radius:0;background:transparent;box-shadow:none;font-size:16px;line-height:1}
+#editor.show .historyControls button+button{border-left:1px solid var(--line)}
+#editor.show .historyControls button:not(:disabled):hover{color:#bfdbfe;background:#1a3154}
+#editor.show .historyControls button:disabled{opacity:.3}

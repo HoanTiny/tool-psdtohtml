@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="vi"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>psd2html — Chuyển PSD sang web</title>
+<link rel="stylesheet" href="../static/css/app.css">
+<link rel="stylesheet" href="../static/css/editor-shell.css">
+<link rel="stylesheet" href="../static/css/export-config.css">
+<link rel="stylesheet" href="../static/css/inspector-config.css"></head><body>
+<div class="wrap">
+  <h1>&#127912; psd2html <span style="font-size:13px;font-weight:400;color:var(--muted)">— Chuyển PSD sang web</span></h1>
+  <p class="sub">Kéo file PSD vào &rarr; <b>Phân tích</b> &rarr; <b>chỉnh sửa &amp; chọn ảnh</b> &rarr; <b>Xuất web</b>.
+    Nhiều file = mỗi file một section, ghép dọc theo <b>thứ tự tên file</b> (vd: <code>01-hero.psd</code>, <code>02-tinh-nang.psd</code>).</p>
+
+  <div class="steps">
+    <span class="st on" id="stp1"><span class="n">1</span> Tải PSD</span>
+    <span class="sep"></span>
+    <span class="st" id="stp2"><span class="n">2</span> Chỉnh sửa</span>
+    <span class="sep"></span>
+    <span class="st" id="stp3"><span class="n">3</span> Xuất web</span>
+  </div>
+
+  <!-- BƯỚC 1: tải PSD -->
+  <div id="step1">
+    <div class="grid">
+      <div class="drop" id="dropD">
+        <div class="big">&#128196; Kéo thả PSD <b>Desktop</b></div>
+        <small>1 file, hoặc nhiều file (mỗi file một section)</small>
+        <div class="fname" id="nameD"></div>
+        <input type="file" id="fileD" accept=".psd" multiple hidden>
+      </div>
+      <div class="drop" id="dropM">
+        <div class="big">&#128241; Kéo thả PSD <b>Mobile</b></div>
+        <small>tuỳ chọn — 1 hoặc nhiều file</small>
+        <div class="fname" id="nameM"></div>
+        <input type="file" id="fileM" accept=".psd" multiple hidden>
+      </div>
+    </div>
+    <div class="drop" id="dropP" style="margin-top:14px">
+      <div class="big">&#129525; Kéo thả PSD <b>Popup</b></div>
+      <small>tuỳ chọn — <b>mỗi file = 1 popup</b> (thể lệ, nạp đầu, sự kiện…). Gán "click mở popup" ở bước chỉnh sửa.</small>
+      <div class="fname" id="nameP"></div>
+      <input type="file" id="fileP" accept=".psd" multiple hidden>
+    </div>
+    <div class="row">
+      <span class="lbl">Chất lượng ảnh:</span>
+      <div class="fmt">
+        <label title="WebP nhẹ, cân bằng — khuyên dùng"><input type="radio" name="quality" value="balanced" checked><span>Cân bằng (WebP)</span></label>
+        <label title="WebP nét hơn, nặng hơn chút"><input type="radio" name="quality" value="high"><span>Nét cao (WebP)</span></label>
+        <label title="Ảnh gốc PNG — nét nhất, nặng nhất"><input type="radio" name="quality" value="png"><span>Ảnh gốc (PNG)</span></label>
+      </div>
+    </div>
+    <div class="row">
+      <button id="goParse">&#128269; Phân tích PSD</button>
+      <small style="color:var(--muted)">PSD lớn có thể mất 1–3 phút để đọc.</small>
+    </div>
+  </div>
+
+  <!-- tiến trình phân tích -->
+  <div class="panel" id="parsePanel">
+    <b id="parseStep">Đang xử lý…</b>
+    <div class="bar"><i></i></div>
+    <div id="parseErr" class="err"></div>
+  </div>
+
+  <!-- BƯỚC 2: TRÌNH CHỈNH SỬA -->
+  <div class="panel" id="editor">
+    <div class="etool">
+      <span class="title">&#9986;&#65039; Trình chỉnh sửa</span>
+      <span class="tabs" id="tabs"></span>
+      <button id="grpMode" title="Gộp nhiều ảnh thành một (như group trong PSD)">&#129513; Gộp ảnh</button>
+      <span class="historyControls">
+        <button class="ghost sm" id="undoBtn" type="button" title="Hoàn tác (Ctrl+Z)" disabled>↶</button>
+        <button class="ghost sm" id="redoBtn" type="button" title="Làm lại (Ctrl+Shift+Z hoặc Ctrl+Y)" disabled>↷</button>
+      </span>      <button class="ghost sm dockToggle" id="toggleLayers" title="Ẩn/hiện Layers">☰ Layers</button>
+      <button class="ghost sm dockToggle" id="toggleInspector" title="Ẩn/hiện Inspector">⚙ Inspector</button>
+      <span class="spacer"></span>
+      <span class="chip" id="selInfo"></span>
+      <button class="ghost sm" id="goReview" title="Xem trước bản HTML thật theo ảnh đang chọn">&#128065; Xem thử</button>
+      <button class="sm" id="goExport">&#128190; Xuất web</button>
+    </div>
+    <div class="dockResizer leftResizer" id="leftResizer" aria-hidden="true"></div>
+    <div class="dockResizer rightResizer" id="rightResizer" aria-hidden="true"></div>
+    <p class="hint" id="edHint">Bấm vào ảnh (trên khung xem trước hoặc trong danh sách) để <b>chọn</b> &rarr; kéo để di chuyển,
+      kéo góc để đổi kích thước, phím <kbd>← ↑ ↓ →</kbd> để nhích. Bỏ tích = không xuất ảnh đó.</p>
+
+    <!-- Tuỳ chọn xuất (đưa lên đầu để chọn định dạng trước) -->
+    <aside class="rightDock" aria-label="Thuộc tính và xuất web">
+      <div class="dockHead">
+        <div><b>Thuộc tính</b><small>Layer đang chọn</small></div>
+        <span class="dockBadge">INSPECTOR</span>
+      </div>
+    <details class="acc exportConfig" id="exportAcc">
+      <summary>
+        <span class="exportSummaryIcon">↗</span>
+        <span class="summaryCopy"><b>Xuất web</b><small>Nền tảng, ngôn ngữ và tính năng</small></span>
+        <span class="arw">⌄</span>
+      </summary>
+      <div class="body">
+        <section class="exportGroup">
+          <div class="exportGroupHead">
+            <span class="groupIndex">01</span>
+            <span><b>Nền tảng</b><small>Chọn cấu trúc project đầu ra</small></span>
+          </div>
+          <div class="formatCards">
+            <label class="formatCard">
+              <input type="radio" name="fmt" value="slices" checked>
+              <span class="formatIcon">◇</span>
+              <span class="formatCopy"><b>HTML</b><small>Xem ngay</small></span>
+              <span class="selectMark">✓</span>
+            </label>
+            <label class="formatCard">
+              <input type="radio" name="fmt" value="react">
+              <span class="formatIcon reactIcon">⚛</span>
+              <span class="formatCopy"><b>React</b><small>Tailwind</small></span>
+              <span class="selectMark">✓</span>
+            </label>
+            <label class="formatCard">
+              <input type="radio" name="fmt" value="next">
+              <span class="formatIcon nextIcon">N</span>
+              <span class="formatCopy"><b>Next.js</b><small>App Router</small></span>
+              <span class="selectMark">✓</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="exportGroup languageGroup" id="langRow" style="display:none">
+          <div class="exportGroupHead">
+            <span class="groupIndex">02</span>
+            <span><b>Ngôn ngữ</b><small>TypeScript được khuyên dùng cho production</small></span>
+          </div>
+          <div class="segmentControl">
+            <label><input type="radio" name="lang" value="js" checked><span>JavaScript</span></label>
+            <label><input type="radio" name="lang" value="ts"><span>TypeScript</span></label>
+          </div>
+        </section>
+
+        <section class="exportGroup behaviorGroup">
+          <div class="exportGroupHead">
+            <span class="groupIndex">03</span>
+            <span><b>Trải nghiệm trang</b><small>Điều khiển cách chuyển section</small></span>
+          </div>
+          <label class="optionRow featuredOption">
+            <input type="checkbox" id="swiper">
+            <span class="optionText"><b>Full-page navigation</b><small>Lăn chuột hoặc vuốt để snap từng section</small></span>
+            <span class="toggleUI"></span>
+          </label>
+        </section>
+
+        <section id="reactOpts" class="exportGroup advancedGroup" style="display:none">
+          <div class="exportGroupHead">
+            <span class="groupIndex">04</span>
+            <span><b>Tính năng production</b><small>Bật những thành phần project cần sử dụng</small></span>
+          </div>
+          <div class="optionList">
+            <label class="optionRow">
+              <input type="checkbox" id="swiper_lib">
+              <span class="optionText"><b>Swiper.js</b><small>Slider chuẩn, hỗ trợ touch và hiệu ứng fade</small></span>
+              <span class="toggleUI"></span>
+            </label>
+            <label class="optionRow">
+              <input type="checkbox" id="env_config">
+              <span class="optionText"><b>Biến môi trường</b><small>Cấu hình link/API qua <code>.env</code></small></span>
+              <span class="toggleUI"></span>
+            </label>
+            <label class="optionRow">
+              <input type="checkbox" id="nav_menu">
+              <span class="optionText"><b>Navigation menu</b><small>Nav chữ thật và điều hướng slideTo</small></span>
+              <span class="toggleUI"></span>
+            </label>
+            <label class="optionRow">
+              <input type="checkbox" id="popups">
+              <span class="optionText"><b>Popup system</b><small>Đăng nhập, thể lệ, lịch sử và nạp đầu</small></span>
+              <span class="toggleUI"></span>
+            </label>
+            <label class="optionRow">
+              <input type="checkbox" id="fx">
+              <span class="optionText"><b>Hiệu ứng chữ và nút</b><small>Shine, glow, hover và chuyển động nhẹ</small></span>
+              <span class="toggleUI"></span>
+            </label>
+            <label class="optionRow">
+              <input type="checkbox" id="fx_reveal">
+              <span class="optionText"><b>Scroll reveal</b><small>Hiện section bằng hiệu ứng zoom hoặc bounce</small></span>
+              <span class="toggleUI"></span>
+            </label>
+            <label class="optionRow">
+              <input type="checkbox" id="fluid">
+              <span class="optionText"><b>Fluid mobile</b><small>Reflow 4→2→1 cột khi không có PSD mobile</small></span>
+              <span class="toggleUI"></span>
+            </label>
+            <label class="optionRow premiumOption">
+              <input type="checkbox" id="ai_enhance">
+              <span class="optionText"><b>AI productionize</b><small>Chuyển chữ thật và bổ sung interaction</small></span>
+              <span class="toggleUI"></span>
+            </label>
+          </div>
+        </section>
+      </div>
+    </details>
+
+    <div id="grpBar" style="display:none">
+      <div class="selPanel" style="border-color:var(--grp);margin-bottom:12px">
+        <div class="r" style="margin-top:0">
+          <b style="color:#7ee2b8" id="grpCount">0 ảnh đã chọn</b>
+          <input id="grpName" placeholder="Tên nhóm (vd: Nền, Nhân vật)" style="flex:1;min-width:150px">
+          <button class="sm" id="grpDo">&#129513; Gộp thành 1 ảnh</button>
+          <button class="ghost sm" id="grpClear">Bỏ chọn</button>
+        </div>
+      </div>
+    </div>
+    <div id="grpSug" style="margin-bottom:12px"></div>
+    <div class="selPanel" id="selPanel" style="display:none"></div>
+    <div class="emptyInspector">
+      <span>◎</span>
+      <b>Chưa chọn layer</b>
+      <small>Chọn một layer trên canvas hoặc trong danh sách để chỉnh thuộc tính.</small>
+    </div>
+    </aside>
+
+    <div class="ed">
+      <div class="prevBox canvasDock">
+        <div class="canvasToolbar">
+          <span class="toolActive">↖ Chọn</span>
+          <span>Giữ Space để di chuyển canvas</span>
+          <button class="ghost sm" id="fitCanvas" type="button">Vừa màn hình</button>
+        </div>
+        <div class="secNav" id="secNav"></div>
+        <div class="pvtop">
+          <span>Nhấp để chọn &middot; kéo để chỉnh</span>
+          <span class="zoom"><button id="zOut" title="Thu nhỏ">&minus;</button><b id="zLbl">100%</b><button id="zIn" title="Phóng to">+</button></span>
+        </div>
+        <div class="stageClip" id="stageClip"><div class="stage" id="stage"></div></div>
+      </div>
+      <aside class="layerDock" aria-label="Danh sách layer">
+        <div class="dockHead">
+          <div><b>Layers</b><small>Cấu trúc PSD</small></div>
+          <span class="dockBadge" id="layerCountBadge">0</span>
+        </div>
+        <div class="listhead">
+          <div class="search">&#128269;<input id="layerSearch" placeholder="Tìm ảnh theo tên…" autocomplete="off"></div>
+        </div>
+        <div id="secList"></div>
+      </aside>
+    </div>
+
+    <div class="actionbar">
+      <button class="ghost" id="restart">&#8617; Phân tích file khác</button>
+      <span class="statusItem" id="canvasMeta">Chưa có canvas</span>
+      <span class="statusItem saveReady" id="saveStatus">● Sẵn sàng</span>
+      <span style="flex:1"></span>
+      <span class="shortcutHint">F Fit · G Group · L Layers · I Inspector · Space Pan</span>
+    </div>
+
+    <div id="reviewBox" style="display:none;margin-top:6px">
+      <div class="row" style="margin:0 0 6px">
+        <b id="reviewStep" style="font-size:14px">Đang dựng bản xem thử…</b>
+        <span style="color:var(--muted);font-size:12px">Bản HTML thật theo ảnh đang chọn (chưa tính responsive của React/Next).</span>
+        <button class="ghost sm" id="reviewOpen" style="margin-left:auto;display:none">&#8599; Mở tab mới</button>
+        <button class="ghost sm modalClose" id="reviewClose" type="button" aria-label="Đóng bản xem thử">&#10005; Đóng</button>
+      </div>
+      <div class="bar" id="reviewBar"><i></i></div>
+      <iframe id="reviewFrame" style="display:none;height:640px"></iframe>
+      <div id="reviewErr" class="err"></div>
+    </div>
+  </div>
+
+  <!-- tiến trình xuất + kết quả -->
+  <div class="panel" id="exportPanel">
+    <div class="panelCloseBar">
+      <b>Kết quả xuất web</b>
+      <button class="ghost sm modalClose" id="exportPanelClose" type="button" aria-label="Đóng kết quả xuất web">&#10005; Đóng</button>
+    </div>
+    <div id="exProgress">
+      <b id="exStep">Đang xuất…</b>
+      <div class="bar"><i></i></div>
+    </div>
+    <div id="result" style="display:none"></div>
+  </div>
+</div>
+<script src="../static/js/app.js" defer></script>
+<script src="../static/js/editor-shell.js" defer></script>
+</body></html>

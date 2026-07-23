@@ -1,0 +1,264 @@
+/* Inspector layer dang section/grid cho workspace editor. */
+#editor.show .rightDock .selPanel{
+  padding:0;
+  overflow:hidden;
+  border:1px solid #2c4567;
+  background:#0a1423;
+}
+
+.inspectorLayerHead{
+  min-height:66px;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:11px;
+  border-bottom:1px solid #263a57;
+  background:linear-gradient(145deg,#112943,#0d1d31);
+}
+
+.layerGlyph{
+  width:36px;
+  height:36px;
+  display:grid;
+  place-items:center;
+  flex:0 0 36px;
+  border:1px solid #3c7fb8;
+  border-radius:10px;
+  color:#c8e8ff;
+  background:#17436a;
+  font-size:13px;
+  font-weight:900;
+}
+
+.layerIdentity{
+  min-width:0;
+  display:flex;
+  flex:1;
+  flex-direction:column;
+}
+
+.layerIdentity small{
+  margin-bottom:2px;
+  color:#7292b5;
+  font-size:9px;
+  font-weight:700;
+  letter-spacing:.65px;
+  text-transform:uppercase;
+}
+
+.layerIdentity b{
+  overflow:hidden;
+  color:#e5f2ff;
+  font-size:11.5px;
+  line-height:1.35;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.layerBadge{
+  flex:0 0 auto;
+  padding:3px 6px;
+  border:1px solid #31715a;
+  border-radius:5px;
+  color:#9ce8c4;
+  background:#123326;
+  font-size:8px;
+  font-weight:800;
+}
+
+.inspectorSection{
+  display:flex;
+  flex-direction:column;
+  gap:9px;
+  padding:11px;
+  border-bottom:1px solid #1e2d43;
+}
+
+.inspectorSection:last-child{border-bottom:0}
+
+.inspectorSectionHead{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  margin-bottom:1px;
+}
+
+.inspectorSectionHead>span{
+  display:grid;
+  width:23px;
+  height:19px;
+  place-items:center;
+  border:1px solid #304866;
+  border-radius:5px;
+  color:#7186a5;
+  background:#0c1728;
+  font-size:7.5px;
+  font-weight:900;
+}
+
+.inspectorSectionHead>b{
+  color:#aebed5;
+  font-size:9.5px;
+  letter-spacing:.5px;
+  text-transform:uppercase;
+}
+
+.transformGrid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:7px;
+}
+
+.inspectorField{
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  color:#7489a9;
+  font-size:9px;
+  font-weight:700;
+}
+
+#editor.show .rightDock .inspectorField input,
+#editor.show .rightDock .inspectorField select,
+#editor.show .rightDock .inspectorField textarea{
+  width:100%;
+  min-width:0;
+  padding:7px 8px;
+  border:1px solid #2c405f;
+  border-radius:7px;
+  outline:0;
+  color:#e4edf9;
+  background:#081321;
+  font-size:10.5px;
+  transition:border-color .15s,box-shadow .15s;
+}
+
+#editor.show .rightDock .inspectorField input:focus,
+#editor.show .rightDock .inspectorField select:focus,
+#editor.show .rightDock .inspectorField textarea:focus{
+  border-color:#4f94e8;
+  box-shadow:0 0 0 2px rgba(79,148,232,.13);
+}
+
+#editor.show .rightDock .transformGrid .num{width:100%}
+
+.layerOrderActions{
+  display:grid;
+  grid-template-columns:1fr 1fr 44px;
+  gap:6px;
+}
+
+#editor.show .rightDock .layerOrderActions button{
+  min-width:0;
+  padding:7px 5px;
+  overflow:hidden;
+  border-radius:7px;
+  font-size:9px;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.layerOrderActions .iconAction{font-family:ui-monospace,monospace}
+
+.fullField{width:100%}
+.fullField textarea{resize:vertical}
+
+.textStyleGrid{
+  display:grid;
+  grid-template-columns:1fr 68px;
+  gap:7px;
+}
+
+#editor.show .rightDock .colorField input{
+  height:33px;
+  padding:3px;
+  cursor:pointer;
+}
+
+.inspectorSwitchRow{
+  position:relative;
+  display:flex;
+  align-items:center;
+  gap:9px;
+  padding:8px 9px;
+  border:1px solid #293c59;
+  border-radius:8px;
+  background:#0b1728;
+  cursor:pointer;
+}
+
+.inspectorSwitchRow>span{
+  min-width:0;
+  display:flex;
+  flex:1;
+  flex-direction:column;
+}
+
+.inspectorSwitchRow b{color:#cdd9ea;font-size:10px}
+.inspectorSwitchRow small{margin-top:2px;color:#6e819f;font-size:8.5px}
+.inspectorSwitchRow input{position:absolute;opacity:0}
+
+.inspectorSwitchRow>i{
+  position:relative;
+  width:32px;
+  height:18px;
+  flex:0 0 32px;
+  border:1px solid #3a4a62;
+  border-radius:20px;
+  background:#172235;
+  transition:.18s;
+}
+
+.inspectorSwitchRow>i::after{
+  content:"";
+  position:absolute;
+  top:2px;
+  left:2px;
+  width:12px;
+  height:12px;
+  border-radius:50%;
+  background:#8291a7;
+  transition:.18s;
+}
+
+.inspectorSwitchRow:has(input:checked){
+  border-color:#3979c7;
+  background:#102441;
+}
+
+.inspectorSwitchRow:has(input:checked)>i{border-color:#4c9aff;background:#2468b6}
+.inspectorSwitchRow:has(input:checked)>i::after{left:16px;background:#fff}
+.compactSwitch{padding:7px 9px}
+
+.fileNameControl{
+  display:flex;
+  align-items:stretch;
+}
+
+#editor.show .rightDock .fileNameControl input{
+  border-radius:7px 0 0 7px;
+}
+
+.fileNameControl em{
+  display:flex;
+  align-items:center;
+  padding:0 8px;
+  border:1px solid #2c405f;
+  border-left:0;
+  border-radius:0 7px 7px 0;
+  color:#7890af;
+  background:#101c2d;
+  font-size:9px;
+  font-style:normal;
+}
+
+.fieldHelp{
+  margin:0;
+  color:#647894;
+  font-size:8.5px;
+  line-height:1.45;
+}
+
+.fieldHelp code{color:#91afd2;font-size:8px}
+.effectSection{background:linear-gradient(180deg,rgba(34,24,60,.18),transparent)}
