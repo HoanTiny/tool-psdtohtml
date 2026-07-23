@@ -267,7 +267,7 @@ def _detect_menu(layout, ab_bbox, by_id, children):
     return ids, toggle["id"]
 
 
-def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id):
+def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id, fx_auto=False):
     ax, ay = ab_bbox["x"], ab_bbox["y"]
     items = []
     for l in layers:
@@ -280,13 +280,16 @@ def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id):
         lk = l.get("link") or {}
         tx = l.get("text") or {}
         as_text = bool(tx.get("asText") and tx.get("content"))
-        is_btn = bool(lk.get("button") or lk.get("url") or lk.get("action")) or _is_interactive(l)
+        popup = lk.get("popup")   # click layer nay -> mo popup (tu PSD popup)
+        is_btn = bool(lk.get("button") or lk.get("url") or lk.get("action") or popup) or _is_interactive(l)
         item = {"id": l["id"], "src": _src(l["asset"], asset_dir),
                 "x": b["x"] - ax, "y": b["y"] - ay, "w": b["width"], "h": b["height"],
                 "o": l.get("opacity", 1), "blend": l.get("blend"),
                 "alt": (l.get("alt") or _alt_of(l)),
-                "href": (lk.get("url") or ("#" if is_btn else None)),
-                "act": (lk.get("action") or (_action_of(l) if is_btn else None)),
+                # popup: LUON dat href="#" de click roi vao openAction -> setPopup (khong dieu huong URL)
+                "href": ("#" if popup else (lk.get("url") or ("#" if is_btn else None))),
+                "act": (("popup:" + str(popup)) if popup
+                        else (lk.get("action") or (_action_of(l) if is_btn else None))),
                 "t": l.get("kind") == "type"}
         if as_text:   # CHU THAT: render text node thay vi img (tru cot 2)
             item["asText"] = True
@@ -298,6 +301,16 @@ def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id):
             item["href"] = None
         elif menu_ids and l["id"] in menu_ids:
             item["menu"] = True
+        # fx: hieu ung. Editor gan tay (l['fx']) uu tien; neu khong va bat AUTO (fx_auto)
+        # thi tu doan: nut -> 'btn'; chu tieu de LON (kind type, cao >= 5% khung) -> 'title'.
+        manual_fx = l.get("fx")
+        if manual_fx:
+            item["fx"] = manual_fx
+        elif fx_auto:
+            if is_btn:
+                item["fx"] = "btn"
+            elif l.get("kind") == "type" and b["height"] >= 0.05 * ab_bbox["height"]:
+                item["fx"] = "title"
         items.append(item)
     return items
 
@@ -375,8 +388,11 @@ def _section_name(flat, W, H, y0, y1, idx, used):
 def _split_sections(board, layout):
     W, H = board["W"], board["H"]
     flat = board["flat"]
-    # nen phu toan trang -> component Background rieng
-    bg = [it for it in flat if it["h"] >= 0.5 * H or it["w"] >= 0.85 * W]
+    # nen phu toan trang -> component Background rieng. KHONG dua vao nen (du to/rong):
+    # nut bam (href), chu that (asText), va layer CO GAN HIEU UNG (fx) - vi nen render
+    # bang <img> thuong, khong qua component Layer nen se MAT hieu ung (float/shine/glow).
+    bg = [it for it in flat if (it["h"] >= 0.5 * H or it["w"] >= 0.85 * W)
+          and not it.get("href") and not it.get("asText") and not it.get("fx")]
     content = [it for it in flat if it not in bg]
     board["backgrounds"] = bg
 
@@ -429,7 +445,7 @@ def _split_sections(board, layout):
 
 
 def _artboards_from_layout(layout, asset_dir="assets", comp_prefix="", extra_exclude=None,
-                           detect_repeats=False):
+                           detect_repeats=False, fx_auto=False):
     cw, ch = layout["canvas"]["width"], layout["canvas"]["height"]
     # Loai cac layer da dua vao FixedNav (nav/logo lap) NGAY TU DAU - truoc ca
     # buoc phat hien cum lap. Neu khong, nav se bi nhan nham la 'cum lap' va sinh
@@ -448,7 +464,7 @@ def _artboards_from_layout(layout, asset_dir="assets", comp_prefix="", extra_exc
     else:
         repeats, consumed = [], set()
     menu_ids, toggle_id = _detect_menu(layout, ab, by_id, children)
-    flat = _build_flat(layout["layers"], ab, consumed, asset_dir, menu_ids, toggle_id)
+    flat = _build_flat(layout["layers"], ab, consumed, asset_dir, menu_ids, toggle_id, fx_auto=fx_auto)
     stem = Path(layout.get("source", "Page")).stem
     board = {"comp": comp_prefix + "Landing", "landing_name": comp_prefix + "Landing",
              "W": cw, "H": ch, "flat": flat, "repeats": repeats, "has_menu": bool(toggle_id)}
@@ -463,7 +479,7 @@ def _gen_types():
         "  id: string; src: string; x: number; y: number; w: number; h: number;\n"
         "  o: number; blend?: string | null; alt?: string; cls?: string;\n"
         "  href?: string | null; act?: string | null; menu?: boolean; toggle?: boolean;\n"
-        "  asText?: boolean; text?: string; tsize?: number; tcolor?: string; lcp?: boolean;\n}\n\n"
+        "  asText?: boolean; text?: string; tsize?: number; tcolor?: string; lcp?: boolean; fx?: string;\n}\n\n"
         "export interface FixedItem {\n"
         "  src: string; x: number; y: number; w: number; h: number;\n"
         "  o: number; blend?: string | null; alt?: string; href?: string | null; nav?: number | null;\n}\n\n"
@@ -568,8 +584,95 @@ export default function FixedNav() {
     return head + tpl
 
 
-def _gen_popups(lang, client):
-    """He popup stub (login/the le/lich su/nap dau...). type=null -> khong hien."""
+def _popup_flat(board):
+    """Gom TOAN BO layer cua 1 popup board thanh 1 mang phang (toa do tuyet doi trong
+    canvas popup): backgrounds (duoi) + flat cac section. Popup la 1 artboard nen toa do
+    da tuyet doi (khong tru y0 nhu section trang chinh)."""
+    flat = list(board.get("backgrounds", []))
+    for s in board.get("sections", []):
+        flat += s.get("flat", [])
+    return flat
+
+
+def _popup_sanitize(flat):
+    """Layer TRONG popup chi clickable khi co URL that (do user gan). Bo href='#'/act
+    suy tu heuristic de KHONG bi document click handler cua Landing mo/dong nham popup."""
+    out = []
+    for it in flat:
+        it = dict(it)
+        href = it.get("href")
+        if not (href and re.match(r"^https?:", str(href))):
+            it.pop("href", None)
+        it.pop("act", None)   # popup: khong dung data-action (tranh trung key voi trang chinh)
+        out.append(it)
+    return out
+
+
+def _gen_popups(popups, lang, client):
+    """He popup dung tu PSD: moi popup render THEO LAYER (nhu section thu nho) trong modal,
+    tu co gian CONTAIN vua man hinh. type = 'popup:<id>' -> hien popup tuong ung; null -> an.
+    Dong bang nut X / click nen / phim Esc (Esc wiring o Landing)."""
+    head = '"use client";\n\n' if client else ""
+    imp = 'import { useEffect, useState } from "react";\n'
+    if lang == "ts":
+        imp += 'import type { LayerItem } from "../../types/landing";\n'
+    pdata = {p["id"]: {"w": p["w"], "h": p["h"],
+                       "layers": json.loads(_flat_json(_popup_sanitize(p["flat"])))}
+             for p in popups}
+    data = json.dumps(pdata, ensure_ascii=False, indent=2)
+    decl = (f"const POPUPS: Record<string, {{ w: number; h: number; layers: LayerItem[] }}> = {data};\n\n"
+            if lang == "ts" else f"const POPUPS = {data};\n\n")
+    sig = ("{ type, onClose }: { type: string | null; onClose: () => void }"
+           if lang == "ts" else "{ type, onClose }")
+    st = "useState<number>(1)" if lang == "ts" else "useState(1)"
+    return head + imp + "\n" + decl + (
+        "// vua man hinh CONTAIN (theo ca rong va cao viewport), gioi han 94vw x 90vh.\n"
+        + ("const calc = (w: number, h: number) => {\n" if lang == "ts" else "const calc = (w, h) => {\n")
+        + '  if (typeof document === "undefined") return 1;\n'
+        "  const vw = document.documentElement.clientWidth * 0.94;\n"
+        "  const vh = document.documentElement.clientHeight * 0.9;\n"
+        "  return Math.min(1, vw / w, vh / h);\n};\n\n"
+        f"export default function Popups({sig}) {{\n"
+        '  const key = type && type.indexOf("popup:") === 0 ? type.slice(6) : type;\n'
+        "  const p = key ? POPUPS[key] : null;\n"
+        f"  const [scale, setScale] = {st};\n"
+        "  useEffect(() => {\n"
+        "    if (!p) return;\n"
+        "    const fit = () => setScale(calc(p.w, p.h));\n"
+        "    fit();\n"
+        '    window.addEventListener("resize", fit);\n'
+        '    return () => window.removeEventListener("resize", fit);\n'
+        "  }, [p]);\n"
+        "  if (!p) return null;\n"
+        "  return (\n"
+        "    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}\n"
+        '      className="fixed inset-0 z-[3000] flex items-center justify-center bg-[rgba(4,8,20,.72)]">\n'
+        '      <div className="relative" style={{ width: p.w * scale, height: p.h * scale }}>\n'
+        '        <button onClick={onClose} aria-label="Đóng"\n'
+        '          className="absolute -right-3 -top-3 z-10 flex h-9 w-9 cursor-pointer items-center '
+        'justify-center rounded-full border-0 bg-[#111a2e] text-2xl leading-none text-[#e8eeff] shadow-lg">&times;</button>\n'
+        '        <div className="absolute left-0 top-0"\n'
+        '          style={{ width: p.w, height: p.h, transformOrigin: "top left", transform: `scale(${scale})` }}>\n'
+        "          {p.layers.map((l) => {\n"
+        "            const ext = !!(l.href && /^https?:/.test(l.href));\n"
+        "            return l.href ? (\n"
+        '              <a key={l.id} href={l.href} data-action="other" target={ext ? "_blank" : undefined}\n'
+        '                rel={ext ? "noopener" : undefined} title={l.alt} className={"hot " + l.cls}>\n'
+        '                <img src={l.src} alt={l.alt} className="block h-full w-full" loading="lazy" decoding="async" />\n'
+        "              </a>\n"
+        "            ) : (\n"
+        '              <img key={l.id} src={l.src} alt={l.alt} width={l.w} height={l.h} className={l.cls} loading="lazy" decoding="async" />\n'
+        "            );\n"
+        "          })}\n"
+        "        </div>\n"
+        "      </div>\n"
+        "    </div>\n"
+        "  );\n}\n")
+
+
+def _gen_popups_stub(lang, client):
+    """He popup stub (login/the le/lich su/nap dau...). type=null -> khong hien.
+    Dung khi bat checkbox 'Popup mau' ma KHONG upload PSD popup (backward-compat)."""
     head = '"use client";\n\n' if client else ""
     sig = ("{ type, onClose }: { type: string | null; onClose: () => void }"
            if lang == "ts" else "{ type, onClose }")
@@ -620,24 +723,82 @@ def _gen_navmenu(board, lang, client):
         "          </li>\n        ))}\n      </ul>\n    </div>\n  );\n}\n")
 
 
-def _gen_layer(lang, client):
+# CSS hieu ung chu & nut (opt-in feats.fx) - trich tu template t028-samkok-tam-quoc.
+# Chi ghi vao index.css/globals.css khi bat fx. Ton trong prefers-reduced-motion.
+FX_CSS = """
+/* ===== Hieu ung chu & nut (fx) ===== */
+@keyframes fxLaluot{from{-webkit-mask-position:150% 0;mask-position:150% 0}to{-webkit-mask-position:0% 0;mask-position:0% 0}}
+.fx-shine{filter:brightness(2);-webkit-mask-image:-webkit-linear-gradient(45deg,rgba(255,255,255,0) 40%,#fff 50%,rgba(255,255,255,0) 60%);mask-image:-webkit-linear-gradient(45deg,rgba(255,255,255,0) 40%,#fff 50%,rgba(255,255,255,0) 60%);-webkit-mask-size:300% 200%;mask-size:300% 200%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;animation:fxLaluot 2.5s linear infinite 1s}
+@keyframes fxGlow{0%,100%{filter:drop-shadow(0 0 5px rgba(255,255,220,.8)) drop-shadow(0 0 15px rgba(255,215,0,.5))}50%{filter:drop-shadow(0 0 8px #fff) drop-shadow(0 0 25px rgba(255,215,0,.85)) drop-shadow(0 0 45px rgba(255,160,0,.5))}}
+.fx-glow{animation:fxGlow 3s ease-in-out infinite}
+@keyframes fxFloat{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-3%) scale(1.03)}}
+.fx-float{animation:fxFloat 2s ease-in-out infinite}
+.fx-btn{transition:transform .18s ease}
+.fx-btn:hover{transform:scale(1.06)}
+@media(prefers-reduced-motion:reduce){.fx-shine,.fx-glow,.fx-float{animation:none}}
+"""
+
+# CSS 'section nay/zoom vao khi cuon toi' (opt-in feats.fx_reveal). Nang cap scroll-reveal
+# fade-up san co thanh pop-in/zoom-in kieu game. Chi ap scroll + deck (swiper_lib da crossfade).
+FX_REVEAL_CSS = """
+/* ===== Hieu ung xuat hien khi cuon (fx_reveal) ===== */
+@keyframes fxPopIn{0%{opacity:0;transform:translateY(26px) scale(.94)}60%{opacity:1;transform:translateY(0) scale(1.03)}100%{opacity:1;transform:none}}
+@keyframes fxZoomIn{0%{opacity:0;transform:scale(1.06)}20%{opacity:1}100%{opacity:1;transform:scale(1)}}
+.fx-reveal .landing-sec.reveal.in{animation:fxPopIn .6s ease-out forwards}
+.fx-reveal .deck .landing-sec.on{animation:fxZoomIn .5s ease-out}
+@media(prefers-reduced-motion:reduce){.fx-reveal .landing-sec.reveal.in,.fx-reveal .deck .landing-sec.on{animation:none}}
+"""
+
+
+def _gen_layer(lang, client, fx=False):
     head = '"use client";\n\n' if client else ""
     imp = 'import type { LayerItem } from "../../types/landing";\n\n' if lang == "ts" else ""
     sig = ("{ l, menuOpen, onToggleMenu }: { l: LayerItem; menuOpen?: boolean; onToggleMenu?: () => void }"
            if lang == "ts" else "{ l, menuOpen, onToggleMenu }")
     react_imp = ""
+    # fx: gan hieu ung theo l.fx (auto 'btn'/'title' hoac editor gan tay: shine/glow/float/
+    # shine-glow/float-glow). shine = lop anh phu mask luot sang (nhu 'Mo Loi Xung Ba').
+    if fx:
+        fx_decl = (
+            '  const FXMAP = { btn: "fx-btn fx-glow ", title: "fx-float fx-glow ", '
+            'shine: "", glow: "fx-glow ", float: "fx-float ", "shine-glow": "fx-glow ", '
+            '"float-glow": "fx-float fx-glow " };\n'
+            '  const fxCls = FXMAP[l.fx || ""] || "";\n'
+            '  const fxShine = l.fx === "btn" || l.fx === "shine" || l.fx === "shine-glow";\n')
+    else:
+        fx_decl = '  const fxCls = "";\n  const fxShine = false;\n'
+    shine = ('      {fxShine && (\n'
+             '        <img src={l.src} alt="" aria-hidden="true"\n'
+             '          className="fx-shine pointer-events-none absolute inset-0 block h-full w-full" />\n'
+             '      )}\n') if fx else ""
+    # anh KHONG link co shine -> boc div.relative (fxCls tren div) + anh goc + lop luot sang.
+    noref = (
+        "  if (fxShine) {\n"
+        '    return (\n'
+        '      <div className={fxCls + l.cls}>\n'
+        '        <img src={l.src} alt={l.alt} className="block h-full w-full" loading={l.lcp ? "eager" : "lazy"} fetchPriority={l.lcp ? "high" : undefined} decoding="async" />\n'
+        '        <img src={l.src} alt="" aria-hidden="true" className="fx-shine pointer-events-none absolute inset-0 block h-full w-full" />\n'
+        "      </div>\n"
+        "    );\n  }\n"
+        "  return (\n"
+        "    <img src={l.src} alt={l.alt} width={l.w} height={l.h} className={fxCls + l.cls} loading={l.lcp ? \"eager\" : \"lazy\"} fetchPriority={l.lcp ? \"high\" : undefined} decoding=\"async\" />\n  );\n"
+    ) if fx else (
+        "  return (\n"
+        "    <img src={l.src} alt={l.alt} width={l.w} height={l.h} className={fxCls + l.cls} loading={l.lcp ? \"eager\" : \"lazy\"} fetchPriority={l.lcp ? \"high\" : undefined} decoding=\"async\" />\n  );\n"
+    )
     # THUAN TAILWIND: l.cls chua san class Tailwind (left-[..]/top-[..]/w-[..]/h-[..]/
     # mix-blend/opacity, va text-[..px]/text-[color] cho chu that). Khong con inline style.
     return head + react_imp + imp + (
         f"// 1 lop: anh (img) HOAC chu that (text). Class Tailwind lay tu l.cls (khong inline style).\n"
         f"export default function Layer({sig}) {{\n"
         f"  const ext = !!(l.href && /^https?:/.test(l.href));\n"
+        f"{fx_decl}"
         "  if (l.asText) {\n"
         "    return l.href ? (\n"
         '      <a href={l.href} data-action={l.act || "other"} target={ext ? "_blank" : undefined} rel={ext ? "noopener" : undefined}\n'
-        '        title={l.alt} className={"hot " + l.cls}>{l.text}</a>\n'
+        '        title={l.alt} className={"hot z-[6] " + fxCls + l.cls}>{l.text}</a>\n'
         "    ) : (\n"
-        "      <div className={l.cls}>{l.text}</div>\n"
+        "      <div className={fxCls + l.cls}>{l.text}</div>\n"
         "    );\n  }\n"
         "  if (l.toggle) {\n"
         "    return (\n"
@@ -646,12 +807,15 @@ def _gen_layer(lang, client):
         '        <img src={l.src} alt={l.alt} width={l.w} height={l.h} className="block w-full h-full" loading={l.lcp ? "eager" : "lazy"} fetchPriority={l.lcp ? "high" : undefined} decoding="async" />\n'
         "      </button>\n    );\n  }\n"
         "  if (l.menu && !menuOpen) return null;\n"
-        "  return l.href ? (\n"
-        '    <a href={l.href} data-action={l.act || "other"} target={ext ? "_blank" : undefined} rel={ext ? "noopener" : undefined}\n'
-        '      title={l.alt} className={"hot " + l.cls}>\n'
-        '      <img src={l.src} alt={l.alt} className="block w-full h-full" loading="lazy" decoding="async" />\n'
-        "    </a>\n  ) : (\n"
-        "    <img src={l.src} alt={l.alt} width={l.w} height={l.h} className={l.cls} loading={l.lcp ? \"eager\" : \"lazy\"} fetchPriority={l.lcp ? \"high\" : undefined} decoding=\"async\" />\n  );\n}\n")
+        "  if (l.href) {\n"
+        "    return (\n"
+        '      <a href={l.href} data-action={l.act || "other"} target={ext ? "_blank" : undefined} rel={ext ? "noopener" : undefined}\n'
+        '        title={l.alt} className={"hot z-[6] " + fxCls + l.cls}>\n'
+        '        <img src={l.src} alt={l.alt} className="block w-full h-full" loading="lazy" decoding="async" />\n'
+        f"{shine}"
+        "      </a>\n    );\n  }\n"
+        f"{noref}"
+        "}\n")
 
 
 def _tw_pos(x, y, w, h):
@@ -706,6 +870,8 @@ def _flat_json(items):
             o["toggle"] = True
         if it.get("lcp"):
             o["lcp"] = True           # anh LCP -> tai som + uu tien cao
+        if it.get("fx"):
+            o["fx"] = it["fx"]        # loai hieu ung (btn/title) - dung khi bat fx
         o["cls"] = _tw_cls(o)          # class Tailwind san (thay inline style)
         keep.append(o)
     return json.dumps(keep, ensure_ascii=False, indent=2)
@@ -900,8 +1066,8 @@ _LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef
     const go = (i) => { idx = Math.max(0, Math.min(N - 1, i));
       secEls.forEach((el, k) => el.classList.toggle("on", k === idx));
       navs.forEach((n, k) => n.classList.toggle("active", k === Math.min(idx, navs.length - 1))); };
-    // CONTAIN: scale theo ca rong lan cao de section cao nhat cung vua viewport (khong cat).
-    const fit = () => { s = Math.min(1, deck.clientWidth / __W__, deck.clientHeight / (stage.offsetHeight || 1)); stage.style.transform = `scale(${s})`; };
+    // FILL WIDTH: scale theo be rong viewport -> lap day be ngang, KHONG vien den 2 ben.
+    const fit = () => { s = deck.clientWidth / __W__; stage.style.transform = `scale(${s})`; };
     window.addEventListener("resize", fit); fit(); go(0);
     // Ep repaint: layer scale khong duoc ve (section DEN) cho toi khi co nhip repaint.
     const kick = () => { stage.style.transform = "none"; void stage.offsetHeight; fit(); };
@@ -940,12 +1106,12 @@ _LANDING_SWIPERLIB_EFFECT = r'''  useEffect(() => {
     // cung dung document.querySelectorAll(".slide-stage") roi giam scale len nhau.
     const root = rootRef.current; if (!root) return;
     const N = __N__;
-    // CONTAIN: scale theo CA rong lan cao (min) de moi section VUA KHIT viewport
-    // (khong tran d/cat). Moi slide cao khac nhau -> scale rieng theo el.offsetHeight.
+    // FILL WIDTH: scale theo BE RONG viewport (giong landing prod) -> LAP DAY be ngang,
+    // KHONG co vien den 2 ben. Chieu cao section = h*s (co the tran/cat neu cao hon
+    // viewport - chap nhan de day be rong nhu thiet ke goc).
     const fit = () => {
+      const s = window.innerWidth / __W__;
       root.querySelectorAll__QS__(".slide-stage").forEach((el) => {
-        const h = el.offsetHeight || 1;
-        const s = Math.min(1, window.innerWidth / __W__, window.innerHeight / h);
         el.style.transform = `scale(${s})`;
       }); };
     fit(); window.addEventListener("resize", fit);
@@ -1144,6 +1310,9 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
     feats = feats or {}
     swiper_lib = bool(feats.get("swiper_lib")) and bool(secs)
     swiper = (swiper and bool(secs)) or swiper_lib
+    # fx_reveal: section nay/zoom vao khi cuon toi (scroll) / chuyen slide (deck). Class
+    # fx-reveal tren <main> kich hoat CSS pop-in; swiper_lib da crossfade san nen bo qua.
+    main_cls = ' className="fx-reveal"' if feats.get("fx_reveal") else ''
     use_navmenu = bool(feats.get("nav_menu")) and has_fixed
     nav_tag = "NavMenu" if use_navmenu else ("FixedNav" if has_fixed else None)
     ys = [s.get("y0", 0) for s in secs]
@@ -1233,7 +1402,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         L.append(_LANDING_SWIPERLIB_EFFECT.replace("__N__", str(len(secs))).replace("__W__", str(W))
                  .replace("__QS__", qs).replace("__ASH__", ash))
         L.append("  return (")
-        L.append('    <main ref={rootRef}>')
+        L.append(f'    <main ref={{rootRef}}{main_cls}>')
         L.append(h1_jsx)
         if nav_tag:
             L.append(f"      <{nav_tag} />")
@@ -1258,7 +1427,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         max_sec_h = max(b[1] for b in bands)
         L.append(_LANDING_SWIPER_EFFECT.replace("useRef(null)", f"useRef{refann}(null)").replace("__W__", str(W)))
         L.append("  return (")
-        L.append("    <main>")
+        L.append(f"    <main{main_cls}>")
         L.append(h1_jsx)
         if nav_tag:
             L.append(f"      <{nav_tag} />")
@@ -1279,7 +1448,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         L.append(f"  const rootRef = useRef{refann}(null);")
         L.append(_LANDING_EFFECT)
         L.append("  return (")
-        L.append('    <main ref={rootRef}>')
+        L.append(f'    <main ref={{rootRef}}{main_cls}>')
         L.append(h1_jsx)
         if nav_tag:
             L.append(f"      <{nav_tag} />")
@@ -1396,7 +1565,7 @@ def _copy_assets(src_out, project_dir, dest):
 
 
 def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, feats=None,
-                       pages_dir=None, config_rel="../../landing.config", comp_base="."):
+                       pages_dir=None, config_rel="../../landing.config", comp_base=".", popups=None):
     """Ghi building-block components (Layer/Background/section/repeat/nav/popup) vao
     base_dir; page composition (Landing + MobileFluid) vao pages_dir. Neu pages_dir=None
     -> page nam CHUNG base_dir (dung cho Next app-router: route o app/, phan con lai o
@@ -1404,8 +1573,8 @@ def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, f
     building-block."""
     base_dir.mkdir(parents=True, exist_ok=True)
     ext = _ext(lang)
-    (base_dir / f"Layer.{ext}").write_text(_gen_layer(lang, client), encoding="utf-8")
     feats = feats or {}
+    (base_dir / f"Layer.{ext}").write_text(_gen_layer(lang, client, fx=feats.get("_fx_render")), encoding="utf-8")
     # Background.{ext} CHI duoc import/render o mode mac dinh (cuon doc), khong dung o
     # mode swiper/swiper_lib (nen ve inline trong section). Khop dung dieu kien voi
     # _gen_landing de KHONG ghi file chet.
@@ -1419,8 +1588,10 @@ def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, f
             (base_dir / f"NavMenu.{ext}").write_text(_gen_navmenu(board, lang, client), encoding="utf-8")
         else:
             (base_dir / f"FixedNav.{ext}").write_text(_gen_fixednav(board, lang, client), encoding="utf-8")
-    if feats.get("popups"):
-        (base_dir / f"Popups.{ext}").write_text(_gen_popups(lang, client), encoding="utf-8")
+    if popups:   # popup dung tu PSD (render theo layer)
+        (base_dir / f"Popups.{ext}").write_text(_gen_popups(popups, lang, client), encoding="utf-8")
+    elif feats.get("popups"):   # checkbox 'Popup mau' khong co PSD -> stub chu
+        (base_dir / f"Popups.{ext}").write_text(_gen_popups_stub(lang, client), encoding="utf-8")
     for sec in board["sections"]:
         (base_dir / f"{sec['comp']}.{ext}").write_text(_gen_section(sec, lang, client), encoding="utf-8")
         for rp in sec["repeats"]:
@@ -1559,7 +1730,7 @@ def _lcp_src(board):
     return None
 
 
-def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None):
+def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None, popups=None):
     feats = feats or {}
     _seo_into_board(layout, board)
     proj = Path(out_dir) / "react-app"
@@ -1578,11 +1749,11 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
     # building-blocks -> src/components/landing[-mobile]; page composition -> src/pages
     _write_landing_dir(src / "components" / "landing", board, lang, False, "../components/Stage",
                        swiper=swiper, feats=feats, pages_dir=src / "pages",
-                       config_rel="../constants/landing.config", comp_base="../components/landing")
+                       config_rel="../constants/landing.config", comp_base="../components/landing", popups=popups)
     if mobile:
         _write_landing_dir(src / "components" / "landing-mobile", mobile["board"], lang, False,
                            "../components/Stage", swiper=swiper, feats=feats, pages_dir=src / "pages",
-                           config_rel="../constants/landing.config", comp_base="../components/landing-mobile")
+                           config_rel="../constants/landing.config", comp_base="../components/landing-mobile", popups=popups)
     if lang == "ts":
         (src / "types").mkdir(exist_ok=True)
         (src / "types" / "landing.ts").write_text(_gen_types(), encoding="utf-8")
@@ -1603,7 +1774,9 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
         (proj / ".env").write_text(_gen_env(client=False), encoding="utf-8")
     # styles (css global)
     (src / "styles").mkdir(exist_ok=True)
-    (src / "styles" / "index.css").write_text(CSS_TW, encoding="utf-8")
+    (src / "styles" / "index.css").write_text(
+        CSS_TW + (FX_CSS if feats.get("_fx_render") else "") + (FX_REVEAL_CSS if feats.get("fx_reveal") else ""),
+        encoding="utf-8")
     # router + root + entry
     (src / f"routes.{ext}").write_text(_gen_routes(board, mobile, fluid, lang), encoding="utf-8")
     (src / f"App.{ext}").write_text(_gen_app_react(), encoding="utf-8")
@@ -1664,13 +1837,15 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
     _copy_assets(out_dir, proj, "assets")
     if mobile:
         _copy_assets(mobile["dir"], proj, "assets-m")
+    for p in (popups or []):   # moi popup: assets rieng /assets-<id>
+        _copy_assets(p["dir"], proj, f"assets-{p['id']}")
     _write_readme(proj, board, mobile, "npm run dev", lang)
     return proj
 
 
 # ---------- NEXT ----------
 
-def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None):
+def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None, popups=None):
     feats = feats or {}
     _seo_into_board(layout, board)
     proj = Path(out_dir) / "next-app"
@@ -1689,11 +1864,11 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None)
     # Landing) o components/. config_rel tinh tu components/landing/ (sau 2 cap).
     _write_landing_dir(proj / "components" / "landing", board, lang, True, "../Stage",
                        swiper=swiper, feats=feats, pages_dir=None,
-                       config_rel="../../constants/landing.config", comp_base=".")
+                       config_rel="../../constants/landing.config", comp_base=".", popups=popups)
     if mobile:
         _write_landing_dir(proj / "components" / "landing-mobile", mobile["board"], lang, True, "../Stage",
                            swiper=swiper, feats=feats, pages_dir=None,
-                           config_rel="../../constants/landing.config", comp_base=".")
+                           config_rel="../../constants/landing.config", comp_base=".", popups=popups)
     if lang == "ts":
         (proj / "types").mkdir(exist_ok=True)
         (proj / "types" / "landing.ts").write_text(_gen_types(), encoding="utf-8")
@@ -1715,7 +1890,9 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None)
     if feats.get("env_config"):
         (proj / ".env").write_text(_gen_env(client=True), encoding="utf-8")
 
-    (proj / "app" / "globals.css").write_text(CSS_TW, encoding="utf-8")
+    (proj / "app" / "globals.css").write_text(
+        CSS_TW + (FX_CSS if feats.get("_fx_render") else "") + (FX_REVEAL_CSS if feats.get("fx_reveal") else ""),
+        encoding="utf-8")
     _mt = _ann(lang, "import('next').Metadata")
     _meta = json.dumps({
         "title": _page_title(board),
@@ -1782,6 +1959,8 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None)
     _copy_assets(out_dir, proj, "assets")
     if mobile:
         _copy_assets(mobile["dir"], proj, "assets-m")
+    for p in (popups or []):   # moi popup: assets rieng /assets-<id>
+        _copy_assets(p["dir"], proj, f"assets-{p['id']}")
     _write_readme(proj, board, mobile, "npm run dev", lang)
     return proj
 
@@ -1820,7 +1999,7 @@ def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False, feats=None
     from .fixed_overlay import detect_fixed_overlay
     fixed_items, drop_ids = detect_fixed_overlay(vdir, layout)
     board = _artboards_from_layout(layout, asset_dir, comp_prefix, extra_exclude=drop_ids,
-                                   detect_repeats=detect_repeats)
+                                   detect_repeats=detect_repeats, fx_auto=bool(feats.get("fx")))
     fx, navk = [], 0
     for it in fixed_items:
         # muc menu bam duoc: chu ngan (loai logo to, icon chuot cao, duong ke mong)
@@ -1850,7 +2029,7 @@ def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False, feats=None
 
 
 def export(out_dir, framework="react", lang="js", mobile_dir=None, detect_repeats=False,
-           swiper=False, feats=None):
+           swiper=False, feats=None, popup_dirs=None):
     out_dir = Path(out_dir)
     if lang not in ("ts", "js"):
         lang = "js"
@@ -1865,8 +2044,28 @@ def export(out_dir, framework="react", lang="js", mobile_dir=None, detect_repeat
         m_layout, m_board = _load_variant(mobile_dir, "assets-m", "M", detect_repeats, feats=feats, lang=lang)
         mobile = {"dir": Path(mobile_dir), "layout": m_layout, "board": m_board}
 
-    proj = _export_next(out_dir, layout, board, mobile, lang, swiper=swiper, feats=feats) if framework == "next" \
-        else _export_react(out_dir, layout, board, mobile, lang, swiper=swiper, feats=feats)
+    # POPUP tu PSD: moi popup = 1 board rieng (assets rieng /assets-<id>), render theo
+    # layer trong modal. popup_dirs = [{"id","name","dir"}]. Khong ai_enhance/repeat cho popup.
+    popups = []
+    for pinfo in (popup_dirs or []):
+        pid = pinfo["id"]
+        p_layout, p_board = _load_variant(pinfo["dir"], f"assets-{pid}", pid.upper(),
+                                          detect_repeats=False, feats={}, lang=lang)
+        popups.append({"id": pid, "name": pinfo.get("name") or pid, "dir": Path(pinfo["dir"]),
+                       "w": p_board["W"], "h": p_board["H"], "flat": _popup_flat(p_board)})
+    if popups:
+        feats["popups"] = True   # bat he popup (Landing import + wiring setPopup)
+
+    # fx_render: sinh Layer co xu ly fx + kem FX_CSS khi bat AUTO (feats.fx) HOAC co
+    # layer nao duoc gan hieu ung TAY (l['fx']) trong editor -> hieu ung tay luon chay.
+    def _has_manual_fx(lay):
+        return any(l.get("fx") for l in (lay or {}).get("layers", []))
+    feats["_fx_render"] = bool(feats.get("fx") or _has_manual_fx(layout)
+                               or (mobile and _has_manual_fx(mobile["layout"])))
+
+    proj = _export_next(out_dir, layout, board, mobile, lang, swiper=swiper, feats=feats, popups=popups) \
+        if framework == "next" \
+        else _export_react(out_dir, layout, board, mobile, lang, swiper=swiper, feats=feats, popups=popups)
 
     nsec = len(board["sections"])
     nrep = sum(len(s["repeats"]) for s in board["sections"])

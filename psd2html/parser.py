@@ -441,7 +441,18 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
         # TRIM: cat le trong suot -> bbox = dung vung pixel NHIN THAY (giam lech,
         # nhat la layer chu co leading/ascent dem quanh). Dời x/y dung luong da cat
         # nen vi tri hien thi KHONG doi, chi chinh xac hon.
-        if export_img is not None and not is_background(node, cw, ch) and _ASSET_CFG.get("trim", True):
+        # Nen THAT (phu gan kin bbox) -> KHONG trim (giu full khung). Nhung layer bi
+        # coi la 'background' MA noi dung that lai NHO trong bbox lon (vd nut/anh co bbox
+        # full-canvas do PSD) -> VAN trim, neu khong asset nho se bi keo gian full man khi
+        # export (img width = bbox.width). Quyet dinh bang do phu alpha trong bbox.
+        do_trim = export_img is not None and _ASSET_CFG.get("trim", True)
+        if do_trim and is_background(node, cw, ch):
+            cb = export_img.getbbox()   # vung pixel co alpha > 0
+            if cb:
+                cov = ((cb[2] - cb[0]) * (cb[3] - cb[1])) / max(1, export_img.width * export_img.height)
+                if cov >= 0.6:          # noi dung phu phan lon -> nen thuc su -> giu nguyen
+                    do_trim = False
+        if do_trim:
             timg, dx, dy = _trim_alpha(export_img)
             if timg is None:
                 export_img = None            # layer trong suot hoan toan -> bo

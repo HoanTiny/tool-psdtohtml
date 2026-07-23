@@ -153,6 +153,10 @@ def _apply_edits(vdir, layout):
             t = dict(l.get("text") or {})
             t.update(e["text"])
             l["text"] = t
+        if e.get("fname"):
+            l["export_name"] = e["fname"]   # ten file mong muon khi xuat (slug hoa sau)
+        if e.get("fx"):
+            l["fx"] = e["fx"]               # hieu ung gan tay cho layer (shine/glow/float...)
         l["z"] = e.get("z", 0)
     # sort on dinh theo z (Python sort stable -> z bang nhau giu nguyen thu tu ve)
     layout["layers"].sort(key=lambda l: l.get("z", 0))
@@ -242,10 +246,15 @@ def _effective_layout(vdir):
     if not groups:
         return _apply_edits(vdir, layout)
     by_id = {l["id"]: l for l in layout["layers"]}
+    # THU TU VE GOC trong PSD (index nho = duoi/nen, lon = tren). Dung de ghep group
+    # DUNG chong lop - khong theo thu tu NGUOI DUNG CLICK chon (Set, tuy tien) nen
+    # tranh loi kieu 'layer dang le o tren lai bi ghep xuong duoi layer khac'.
+    paint_order = {l["id"]: i for i, l in enumerate(layout["layers"])}
     assets_dir = vdir / "assets"
     for g in groups:
         members = [by_id[i] for i in g["members"] if i in by_id]
         members = [m for m in members if m.get("asset")]
+        members.sort(key=lambda m: paint_order.get(m["id"], 0))   # duoi -> tren (dung z-order)
         if len(members) < 2:
             continue
         gid = g["id"]
@@ -383,6 +392,8 @@ def _variant_manifest(job_id, vdir, url_prefix):
                          "color": tx.get("color"), "asText": bool(tx.get("asText"))} if tx.get("content") else None,
             "link": l.get("link"),
             "alt": l.get("alt", ""),
+            "fname": l.get("export_name", ""),        # ten file xuat tuy chinh (rong = mac dinh)
+            "fx": l.get("fx", ""),                     # hieu ung gan tay (rong = khong)
         })
 
     # Group co san trong PSD (folder) -> goi y gop nguyen folder
@@ -410,13 +421,45 @@ def _variant_manifest(job_id, vdir, url_prefix):
 
 def _build_manifest(job_id):
     out = JOBS_DIR / job_id / "out"
-    man = {"desktop": _variant_manifest(job_id, out, ""), "mobile": None}
+    man = {"desktop": _variant_manifest(job_id, out, ""), "mobile": None, "popups": []}
     if (out / "_mobile" / "layout.json").exists():
         man["mobile"] = _variant_manifest(job_id, out / "_mobile", "_mobile/")
+    pdir = out / "_popups"
+    if pdir.exists():
+        for d in sorted(pdir.iterdir()):
+            if not (d / "layout.json").exists():
+                continue
+            pid = d.name
+            vm = _variant_manifest(job_id, d, f"_popups/{pid}/")
+            nm = (d / "name.txt").read_text(encoding="utf-8").strip() if (d / "name.txt").exists() else pid
+            man["popups"].append({"id": pid, "name": nm, **vm})
     return man
 
 
-def _run_parse(job_id, desktop_psds, mobile_psds, quality="balanced"):
+def _ensure_job(job_id):
+    """Tra job trong RAM; neu mat (server restart) nhung du lieu con tren dia
+    (output_web/<job>/out/layout.json) thi PHUC HOI lai job -> export/preview/edit
+    khong bi 'Job khong ton tai' sau khi restart."""
+    existing = jobs.get(job_id)
+    if existing:
+        return existing
+    if not job_id or "/" in job_id or "\\" in job_id or ".." in job_id:
+        return None
+    out = JOBS_DIR / job_id / "out"
+    if not ((out / "layout.json").exists() or (out / "layout.orig.json").exists()):
+        return None
+    job = {"phase": "parse", "status": "done", "step": "San sang chinh sua",
+           "sections": 0, "error": None, "manifest": None,
+           "preview": None, "download": None, "files": []}
+    try:
+        job["manifest"] = _build_manifest(job_id)
+    except Exception:
+        pass
+    jobs[job_id] = job
+    return job
+
+
+def _run_parse(job_id, desktop_psds, mobile_psds, quality="balanced", popup_psds=None):
     job = jobs[job_id]
     out = JOBS_DIR / job_id / "out"
     if out.exists():                       # don ket qua cu (tranh lan file section cu)
@@ -429,6 +472,14 @@ def _run_parse(job_id, desktop_psds, mobile_psds, quality="balanced"):
         if mobile_psds:
             job["step"] = "Doc PSD mobile..."
             _parse_input(mobile_psds, out / "_mobile", quality)
+
+        # POPUP: moi file -> 1 popup rieng out/_popups/p<i> (1 file/popup, khong ghep)
+        for i, pf in enumerate(popup_psds or []):
+            pid = f"p{i}"
+            job["step"] = f"Doc PSD popup {i + 1}..."
+            pdir = out / "_popups" / pid
+            _parse_input([pf], pdir, quality)
+            (pdir / "name.txt").write_text(Path(pf).stem, encoding="utf-8")   # ten hien thi
 
         job["step"] = "Dung trinh chinh sua..."
         job["manifest"] = _build_manifest(job_id)
@@ -445,6 +496,44 @@ def _run_parse(job_id, desktop_psds, mobile_psds, quality="balanced"):
 # BUOC 3: EXPORT (nhanh) -> loc layer bi bo roi render code + ZIP
 # ----------------------------------------------------------------------------
 
+def _slug_name(s):
+    """Chuan hoa ten do user nhap -> ten file an toan (khong dau, khong khoang trang)."""
+    import re, unicodedata
+    s = unicodedata.normalize("NFKD", str(s or ""))
+    s = s.encode("ascii", "ignore").decode()      # bo dau tieng Viet
+    s = re.sub(r"[^a-zA-Z0-9._-]+", "-", s).strip("-._").lower()
+    return s or "img"
+
+
+def _apply_export_names(vdir, layout):
+    """Doi ten file asset khi xuat: layer co 'export_name' -> tao ban COPY assets/<slug>.<ext>
+    (ten khong trung) va tro layer sang ban do. KHONG xoa ban goc (chia se voi cache parse)."""
+    vdir = Path(vdir)
+    used = {Path(l["asset"]).name for l in layout["layers"] if l.get("asset")}
+    for l in layout["layers"]:
+        nm = l.get("export_name")
+        if not nm or not l.get("asset"):
+            continue
+        src = vdir / l["asset"]
+        if not src.exists():
+            continue
+        ext = src.suffix
+        base = _slug_name(Path(str(nm)).stem)      # bo duoi neu user go kem .webp
+        cand, k = base + ext, 1
+        while cand in used and cand != src.name:   # tranh dung ten layer khac
+            k += 1
+            cand = f"{base}-{k}{ext}"
+        used.add(cand)
+        dst = src.parent / cand
+        if dst != src:
+            try:
+                shutil.copyfile(src, dst)
+            except OSError:
+                continue
+        l["asset"] = f"assets/{cand}"
+    return layout
+
+
 def _apply_selection(vdir, disabled):
     """
     Ghi layout.json = layout HIEU LUC (pristine + group) roi BO cac layer id trong
@@ -455,10 +544,38 @@ def _apply_selection(vdir, disabled):
     dis = set(disabled or [])
     if dis:
         layout["layers"] = [l for l in layout["layers"] if l.get("id") not in dis]
+    layout = _apply_export_names(vdir, layout)     # doi ten file asset theo yeu cau user
     (vdir / "layout.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _run_export(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m):
+def _reset_project_dir(p):
+    """Xoa code sinh cu trong project react/next NHUNG GIU LAI node_modules -> tranh
+    cai lai npm moi lan + tranh loi [WinError 5] khoa file esbuild.exe khi con server
+    xem truoc/build cu dang giu (Windows khong cho xoa file dang mo)."""
+    import stat
+    p = Path(p)
+    if not p.exists():
+        return
+
+    def _onerr(func, path, exc):   # file read-only/locked -> bo write-protect roi thu lai
+        try:
+            _os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
+    for child in p.iterdir():
+        if child.name == "node_modules":     # GIU: khong dung toi -> khong dinh khoa esbuild
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, onerror=_onerr)
+        else:
+            try:
+                child.unlink()
+            except OSError:
+                pass
+
+
+def _run_export(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m, disabled_p=None):
     job = jobs[job_id]
     out = JOBS_DIR / job_id / "out"
     try:
@@ -470,11 +587,28 @@ def _run_export(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m):
         if has_mobile:
             _apply_selection(mobile_dir, disabled_m)
 
-        # Don ket qua render cu (tranh lan file section cu khi xuat lai)
-        for stale in ("react-app", "next-app", "sections"):
-            p = out / stale
-            if p.exists():
-                shutil.rmtree(p, ignore_errors=True)
+        # POPUP: ap lua chon anh cho tung popup + gom danh sach thu muc popup
+        disabled_p = disabled_p or {}
+        popup_dirs = []
+        pdir = out / "_popups"
+        if pdir.exists():
+            for d in sorted(pdir.iterdir()):
+                if not (d / "layout.json").exists():
+                    continue
+                pid = d.name
+                _apply_selection(d, disabled_p.get(pid) or [])
+                nm = (d / "name.txt").read_text(encoding="utf-8").strip() if (d / "name.txt").exists() else pid
+                popup_dirs.append({"id": pid, "name": nm, "dir": str(d)})
+
+        # Don ket qua render cu (tranh lan file section cu khi xuat lai). Dung preview
+        # TRUOC (nha khoa file). react/next: GIU node_modules (khong xoa -> khong dinh
+        # khoa esbuild.exe). 'sections' (slices) khong co node_modules -> xoa han.
+        _kill_preview(job_id)
+        _reset_project_dir(out / "react-app")
+        _reset_project_dir(out / "next-app")
+        p = out / "sections"
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
 
         job["step"] = "Sinh code..."
         asset_names = None
@@ -489,11 +623,14 @@ def _run_export(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m):
             proj = export_web(str(out), framework=fmt, lang=lang,
                               mobile_dir=str(mobile_dir) if has_mobile else None,
                               detect_repeats=feats.get("fluid", False),
-                              swiper=swiper, feats=feats)
+                              swiper=swiper, feats=feats, popup_dirs=popup_dirs)
             # bo anh thua (layer an / thanh vien da gop) khoi ban copy trong project
             _prune_assets(Path(proj) / "public" / "assets", _used_asset_names(out))
             if has_mobile:
                 _prune_assets(Path(proj) / "public" / "assets-m", _used_asset_names(mobile_dir))
+            for p in popup_dirs:   # popup: don asset thua trong /assets-<id>
+                _prune_assets(Path(proj) / "public" / f"assets-{p['id']}",
+                              _used_asset_names(Path(p["dir"])))
             job["preview"] = None
             zip_src = Path(proj)
             zip_include = None  # zip toan bo project
@@ -580,8 +717,14 @@ def _kill_preview(job_id):
     proc = info.get("proc")
     if proc and proc.poll() is None:
         try:
-            proc.terminate()
-            proc.wait(timeout=5)
+            if _os.name == "nt":
+                # npm.cmd tao tien trinh con (vite/next). terminate tien trinh cha
+                # khong dam bao tien trinh con dung, nen can dung ca cay tien trinh.
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True, timeout=10, check=False)
+            else:
+                proc.terminate()
+                proc.wait(timeout=5)
         except Exception:
             try:
                 proc.kill()
@@ -617,6 +760,18 @@ def _npm(args, cwd, timeout=None):
         return False, f"npm {' '.join(args)}: {e}"
 
 
+def _node_dependencies_ready(proj, fmt):
+    """Kiem tra dependency build THUC SU san sang, khong chi nhin thu muc.
+
+    Mot lan xoa bi gian doan co the de lai node_modules rong/do dang. Khi do viec
+    chi kiem tra node_modules.exists() se bo qua npm install du vite/next da mat.
+    """
+    tool = "next" if fmt == "next" else "vite"
+    shim = f"{tool}.cmd" if _os.name == "nt" else tool
+    return ((proj / "node_modules" / tool / "package.json").is_file()
+            and (proj / "node_modules" / ".bin" / shim).is_file())
+
+
 def _run_build_preview(job_id, fmt):
     """Build project react/next roi chay server tinh -> job['build'] mang tien do."""
     job = jobs[job_id]
@@ -627,13 +782,15 @@ def _run_build_preview(job_id, fmt):
         if not (proj / "package.json").exists():
             raise RuntimeError("Chua co project. Hay bam Xuat web (react/next) truoc.")
 
-        # 1) cai dependency (bo qua neu da co node_modules -> lan sau nhanh)
-        if not (proj / "node_modules").exists():
-            b["step"] = "npm install (lan dau, co the vai phut)..."
+        # 1) cai dependency neu chua co HOAC node_modules bi xoa do dang.
+        if not _node_dependencies_ready(proj, fmt):
+            b["step"] = "npm install (thieu dependency, co the vai phut)..."
             ok, log = _npm(["install", "--no-audit", "--no-fund"], proj, timeout=900)
             if not ok:
                 raise RuntimeError("npm install that bai")
             b["log"] = log
+            if not _node_dependencies_ready(proj, fmt):
+                raise RuntimeError("npm install xong nhung vite/next van bi thieu")
 
         # 2) build tinh
         b["step"] = "npm run build..."
@@ -766,11 +923,14 @@ def parse():
 
     d_paths = _save_uploads(desktops, jdir, "d")
     m_paths = _save_uploads(request.files.getlist("mobile"), jdir, "m")
+    # POPUP: moi file = 1 popup rieng (khong ghep doc nhu section)
+    p_files = [f for f in request.files.getlist("popup") if f and f.filename]
+    p_paths = _save_uploads(p_files, jdir, "p") if p_files else []
 
     jobs[job_id] = {"phase": "parse", "status": "running", "step": "Bat dau...",
                     "sections": len(d_paths), "error": None, "manifest": None,
                     "preview": None, "download": None, "files": []}
-    threading.Thread(target=_run_parse, args=(job_id, d_paths, m_paths, quality),
+    threading.Thread(target=_run_parse, args=(job_id, d_paths, m_paths, quality, p_paths),
                      daemon=True).start()
     return jsonify({"job_id": job_id})
 
@@ -780,7 +940,7 @@ def export():
     """Buoc 3: nhan lua chon (format/option + danh sach anh bo) -> render + ZIP."""
     data = request.get_json(silent=True) or {}
     job_id = data.get("job_id")
-    job = jobs.get(job_id)
+    job = _ensure_job(job_id)
     if not job:
         return jsonify({"error": "Job khong ton tai hoac da het han. Hay phan tich lai."}), 400
     if not (JOBS_DIR / job_id / "out" / "layout.json").exists():
@@ -799,15 +959,17 @@ def export():
     swiper = _flag(data.get("swiper"))
     feats = {"swiper_lib": _flag(data.get("swiper_lib")), "popups": _flag(data.get("popups")),
              "env_config": _flag(data.get("env_config")), "nav_menu": _flag(data.get("nav_menu")),
-             "ai_enhance": _flag(data.get("ai_enhance")), "fluid": _flag(data.get("fluid"))}
+             "ai_enhance": _flag(data.get("ai_enhance")), "fluid": _flag(data.get("fluid")),
+             "fx": _flag(data.get("fx")), "fx_reveal": _flag(data.get("fx_reveal"))}
     disabled_d = data.get("disabled_desktop") or []
     disabled_m = data.get("disabled_mobile") or []
+    disabled_p = data.get("disabled_popup") or {}   # {pid: [layerIds]}
 
     job.update(phase="export", status="running", format=fmt, lang=lang,
                step="Bat dau xuat...", error=None, trace=None,
                preview=None, download=None, files=[])
     threading.Thread(target=_run_export,
-                     args=(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m),
+                     args=(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m, disabled_p),
                      daemon=True).start()
     return jsonify({"job_id": job_id})
 
@@ -818,7 +980,7 @@ def build_preview():
     doc tien do qua /status (truong 'build')."""
     data = request.get_json(silent=True) or {}
     job_id = data.get("job_id")
-    job = jobs.get(job_id)
+    job = _ensure_job(job_id)
     if not job:
         return jsonify({"error": "Job khong ton tai. Hay phan tich lai."}), 400
     fmt = job.get("format")
@@ -832,7 +994,11 @@ def build_preview():
 
 def _variant_dir(job_id, variant):
     out = JOBS_DIR / job_id / "out"
-    return out / "_mobile" if variant == "mobile" else out
+    if variant == "mobile":
+        return out / "_mobile"
+    if isinstance(variant, str) and variant.startswith("popup:"):
+        return out / "_popups" / variant.split(":", 1)[1]
+    return out
 
 
 @app.route("/group", methods=["POST"])
@@ -843,7 +1009,7 @@ def group():
     variant = data.get("variant", "desktop")
     members = [m for m in (data.get("members") or []) if m]
     name = (data.get("name") or "Group").strip()[:40]
-    job = jobs.get(job_id)
+    job = _ensure_job(job_id)
     vdir = _variant_dir(job_id, variant)
     if not job or not (vdir / "layout.json").exists():
         return jsonify({"error": "Chua co du lieu parse."}), 400
@@ -874,7 +1040,7 @@ def ungroup():
     job_id = data.get("job_id")
     variant = data.get("variant", "desktop")
     gid = data.get("group_id")
-    job = jobs.get(job_id)
+    job = _ensure_job(job_id)
     vdir = _variant_dir(job_id, variant)
     if not job or not (vdir / "layout.json").exists():
         return jsonify({"error": "Chua co du lieu parse."}), 400
@@ -897,7 +1063,7 @@ def edit():
     data = request.get_json(silent=True) or {}
     job_id = data.get("job_id")
     variant = data.get("variant", "desktop")
-    job = jobs.get(job_id)
+    job = _ensure_job(job_id)
     vdir = _variant_dir(job_id, variant)
     if not job or not (vdir / "layout.json").exists():
         return jsonify({"error": "Chua co du lieu parse."}), 400
@@ -928,7 +1094,7 @@ def preview():
     """Xem thu: render slices theo lua chon anh hien tai (khong ZIP)."""
     data = request.get_json(silent=True) or {}
     job_id = data.get("job_id")
-    job = jobs.get(job_id)
+    job = _ensure_job(job_id)
     if not job or not (JOBS_DIR / job_id / "out" / "layout.json").exists():
         return jsonify({"error": "Chua co du lieu parse. Hay phan tich lai."}), 400
 
@@ -945,7 +1111,7 @@ def preview():
 
 @app.route("/status/<job_id>")
 def status(job_id):
-    job = jobs.get(job_id)
+    job = _ensure_job(job_id)
     if not job:
         return jsonify({"error": "khong tim thay job"}), 404
     return jsonify(job)
@@ -1055,6 +1221,17 @@ INDEX_HTML = """<!doctype html>
   .stage .lyr.off,.stage img.off{display:none}
   .stage .txt{overflow:hidden}
   .stage .lyr.sel{outline:2px solid var(--sky);z-index:50}
+  /* DEMO hieu ung ngay trong editor (khop voi FX_CSS khi xuat) */
+  @keyframes fxLaluot{from{-webkit-mask-position:150% 0;mask-position:150% 0}to{-webkit-mask-position:0% 0;mask-position:0% 0}}
+  @keyframes fxGlow{0%,100%{filter:drop-shadow(0 0 5px rgba(255,255,220,.8)) drop-shadow(0 0 15px rgba(255,215,0,.5))}50%{filter:drop-shadow(0 0 8px #fff) drop-shadow(0 0 25px rgba(255,215,0,.85)) drop-shadow(0 0 45px rgba(255,160,0,.5))}}
+  @keyframes fxFloat{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-3%) scale(1.03)}}
+  .stage .fx-glow{animation:fxGlow 3s ease-in-out infinite}
+  .stage .fx-float{animation:fxFloat 2s ease-in-out infinite}
+  .stage .lyr-fxshine{position:absolute;pointer-events:none;filter:brightness(2);
+    -webkit-mask-image:-webkit-linear-gradient(45deg,rgba(255,255,255,0) 40%,#fff 50%,rgba(255,255,255,0) 60%);
+    mask-image:-webkit-linear-gradient(45deg,rgba(255,255,255,0) 40%,#fff 50%,rgba(255,255,255,0) 60%);
+    -webkit-mask-size:300% 200%;mask-size:300% 200%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
+    animation:fxLaluot 2.5s linear infinite 1s;z-index:40}
   .secmark{position:absolute;left:0;right:0;border-top:2px dashed rgba(56,189,248,.55);pointer-events:none}
   .secmark span{position:absolute;top:2px;left:4px;font-size:10px;background:rgba(56,189,248,.9);color:#04212e;font-weight:700;padding:1px 6px;border-radius:0 0 6px 0}
   .selov{position:absolute;border:1.5px solid var(--sky);box-shadow:0 0 0 9999px rgba(2,6,20,.04);z-index:60}
@@ -1158,6 +1335,12 @@ INDEX_HTML = """<!doctype html>
         <input type="file" id="fileM" accept=".psd" multiple hidden>
       </div>
     </div>
+    <div class="drop" id="dropP" style="margin-top:14px">
+      <div class="big">&#129525; Kéo thả PSD <b>Popup</b></div>
+      <small>tuỳ chọn — <b>mỗi file = 1 popup</b> (thể lệ, nạp đầu, sự kiện…). Gán "click mở popup" ở bước chỉnh sửa.</small>
+      <div class="fname" id="nameP"></div>
+      <input type="file" id="fileP" accept=".psd" multiple hidden>
+    </div>
     <div class="row">
       <span class="lbl">Chất lượng ảnh:</span>
       <div class="fmt">
@@ -1223,6 +1406,8 @@ INDEX_HTML = """<!doctype html>
             <label style="cursor:pointer"><input type="checkbox" id="env_config" style="margin-right:6px"><span>Cấu hình link/API bằng <code>.env</code> (VITE_APP_*)</span></label>
             <label style="cursor:pointer"><input type="checkbox" id="nav_menu" style="margin-right:6px"><span>Nav chữ + slideTo (cấu hình được)</span></label>
             <label style="cursor:pointer"><input type="checkbox" id="popups" style="margin-right:6px"><span>Popup mẫu (đăng nhập / thể lệ / lịch sử / nạp đầu)</span></label>
+            <label style="cursor:pointer"><input type="checkbox" id="fx" style="margin-right:6px"><span>&#10024; Hiệu ứng chữ &amp; nút (nút lướt sáng + hover, quầng vàng; tiêu đề trôi nhẹ + phát sáng)</span></label>
+            <label style="cursor:pointer"><input type="checkbox" id="fx_reveal" style="margin-right:6px"><span>&#127916; Hiệu ứng xuất hiện khi cuộn (section nảy/zoom vào khi cuộn tới)</span></label>
             <label style="cursor:pointer"><input type="checkbox" id="fluid" style="margin-right:6px"><span>&#128241; Mobile co giãn thật (section xếp dọc, lưới reflow 4&rarr;2&rarr;1 cột) — không dùng khi đã có PSD mobile</span></label>
             <label style="cursor:pointer"><input type="checkbox" id="ai_enhance" style="margin-right:6px"><span>&#10024; AI prod-hoá (chữ thật + hover) — cần API key trong <code>.env</code></span></label>
           </div>
@@ -1288,7 +1473,7 @@ INDEX_HTML = """<!doctype html>
   </div>
 </div>
 <script>
-let filesD=[], filesM=[];
+let filesD=[], filesM=[], filesP=[];
 let JOB=null, MAN=null, curTab='desktop';
 const disabled={desktop:new Set(), mobile:new Set()};
 let groupMode=false;
@@ -1301,24 +1486,26 @@ let previewZoom=1;          // he so phong khung xem truoc (1 = vua be rong cot)
 function setStep(n){ [1,2,3].forEach(i=>{ const e=document.getElementById("stp"+i);
   e.classList.toggle("on", i===n); e.classList.toggle("done", i<n); }); }
 
-function showList(nameEl, arr){
+function showList(nameEl, arr, unit){
+  unit=unit||"section";
   if(!arr.length){ nameEl.innerHTML=""; return; }
   const sorted=[...arr].sort((a,b)=>a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
   if(sorted.length===1){ nameEl.textContent="\\u2713 "+sorted[0].name; return; }
-  nameEl.innerHTML="\\u2713 "+sorted.length+" section:<br>"
+  nameEl.innerHTML="\\u2713 "+sorted.length+" "+unit+":<br>"
     + sorted.map((f,i)=>(i+1)+". "+f.name).join("<br>");
 }
-function setupDrop(dropId, inputId, nameId, get, set){
+function setupDrop(dropId, inputId, nameId, get, set, unit){
   const drop=document.getElementById(dropId), input=document.getElementById(inputId), name=document.getElementById(nameId);
   drop.onclick=()=>input.click();
-  input.onchange=()=>{ if(input.files.length){ set([...input.files]); showList(name,get()); } };
+  input.onchange=()=>{ if(input.files.length){ set([...input.files]); showList(name,get(),unit); } };
   ["dragover","dragenter"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add("over")}));
   ["dragleave","drop"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove("over")}));
   drop.addEventListener("drop",ev=>{ const fs=[...ev.dataTransfer.files].filter(f=>/\\.psd$/i.test(f.name));
-    if(fs.length){ set(fs); showList(name,get()); }});
+    if(fs.length){ set(fs); showList(name,get(),unit); }});
 }
-setupDrop("dropD","fileD","nameD",()=>filesD,a=>filesD=a);
-setupDrop("dropM","fileM","nameM",()=>filesM,a=>filesM=a);
+setupDrop("dropD","fileD","nameD",()=>filesD,a=>filesD=a,"section");
+setupDrop("dropM","fileM","nameM",()=>filesM,a=>filesM=a,"section");
+setupDrop("dropP","fileP","nameP",()=>filesP,a=>filesP=a,"popup");
 
 document.querySelectorAll('input[name=fmt]').forEach(r=>r.addEventListener('change',()=>{
   const f=document.querySelector('input[name=fmt]:checked').value;
@@ -1350,6 +1537,7 @@ goParse.onclick=async()=>{
   const fd=new FormData();
   filesD.forEach(f=>fd.append("desktop",f));
   filesM.forEach(f=>fd.append("mobile",f));
+  filesP.forEach(f=>fd.append("popup",f));
   fd.append("quality",(document.querySelector('input[name=quality]:checked')||{}).value||'balanced');
   goParse.disabled=true; parsePanel.classList.add("show"); parseErr.textContent="";
   editor.classList.remove("show"); parseStep.textContent="Đang tải file lên…";
@@ -1377,27 +1565,54 @@ async function pollParse(){
 }
 
 // ---- BUOC 2: editor ----
+// State theo TAB (desktop/mobile/popup:<id>) -> tao Set moi cho moi tab khi mo editor.
+function resetTabState(tabList){
+  [disabled,groupSel,collapsed].forEach(o=>{
+    Object.keys(o).forEach(k=>delete o[k]);
+    tabList.forEach(t=>o[t]=new Set());
+  });
+}
+// Danh sach popup dang co (dung cho tab + dropdown 'Mo popup')
+function popupsList(){ return MAN&&MAN.popups?MAN.popups:[]; }
+// Map anh bi tat theo tung popup: {pid:[layerIds]} de gui khi export
+function disabledPopupMap(){ const m={}; popupsList().forEach(p=>{ const s=disabled['popup:'+p.id];
+  if(s&&s.size) m[p.id]=[...s]; }); return m; }
+
 function openEditor(){
   document.getElementById("step1").style.display="none";
-  disabled.desktop.clear(); disabled.mobile.clear();
-  groupSel.desktop.clear(); groupSel.mobile.clear();
-  collapsed.desktop.clear(); collapsed.mobile.clear();
+  const tabList=[{tab:'desktop',label:'\\u{1F4BB} Desktop'}];
+  if(MAN.mobile) tabList.push({tab:'mobile',label:'\\u{1F4F1} Mobile'});
+  popupsList().forEach(p=>tabList.push({tab:'popup:'+p.id,label:'\\u{1F9E9} '+p.name}));
+  resetTabState(tabList.map(t=>t.tab));
   groupMode=false; sel=null; curSec=-1; layerQuery=""; previewZoom=1; document.getElementById("grpMode").classList.remove("active");
   curTab='desktop';
   const tabs=document.getElementById("tabs");
   tabs.innerHTML="";
-  if(MAN.mobile){
-    ["desktop","mobile"].forEach(t=>{ const b=document.createElement("button");
-      b.textContent=t==='desktop'?'\\u{1F4BB} Desktop':'\\u{1F4F1} Mobile';
-      b.className=t===curTab?'active':''; b.onclick=()=>{curTab=t; groupSel[t].clear(); sel=null; curSec=-1; render();}; tabs.appendChild(b); });
+  if(tabList.length>1){
+    tabList.forEach(({tab,label})=>{ const b=document.createElement("button");
+      b.textContent=label; b.dataset.tab=tab; b.className=tab===curTab?'active':'';
+      b.onclick=()=>{curTab=tab; groupSel[tab].clear(); sel=null; curSec=-1; render();}; tabs.appendChild(b); });
+  }
+  // Co PSD popup -> he popup dung tu PSD (auto bat khi xuat), bao cho user biet
+  const popChk=document.getElementById('popups');
+  if(popChk){
+    const popLbl=popChk.parentElement.querySelector('span');
+    if(popupsList().length){ popChk.checked=true; popChk.disabled=true;
+      if(popLbl) popLbl.textContent='Popup từ PSD ('+popupsList().length+' popup) — bật sẵn theo file đã tải';
+    }else{ popChk.disabled=false;
+      if(popLbl) popLbl.textContent='Popup mẫu (đăng nhập / thể lệ / lịch sử / nạp đầu)';
+    }
   }
   editor.classList.add("show"); setStep(2); render();
 }
 
-function variant(){ return MAN[curTab]; }
+function variant(){
+  if(curTab.indexOf('popup:')===0){ const pid=curTab.slice(6); return popupsList().find(p=>p.id===pid); }
+  return MAN[curTab];
+}
 
 function render(){
-  document.querySelectorAll('#tabs button').forEach((b,i)=>b.className=(['desktop','mobile'][i]===curTab)?'active':'');
+  document.querySelectorAll('#tabs button').forEach(b=>b.className=(b.dataset.tab===curTab)?'active':'');
   const v=variant(), dis=disabled[curTab];
   if(sel && !v.layers.some(l=>l.id===sel)) sel=null;   // sel khong con -> bo
   v.layers.sort((a,b)=>(a.z||0)-(b.z||0));              // thu tu lop (z), stable
@@ -1412,15 +1627,21 @@ function render(){
   stage.style.width=(v.canvas.width*scale)+"px";
   stage.style.height=(v.canvas.height*scale)+"px";
   let html="";
+  // DEMO hieu ung: map l.fx -> class demo trong preview (+ lop luot sang neu can)
+  const FX_BASE={glow:'fx-glow',float:'fx-float','float-glow':'fx-float fx-glow','shine-glow':'fx-glow',btn:'fx-glow'};
+  const FX_SHINE=new Set(['shine','shine-glow','btn']);
   v.layers.forEach(l=>{ const b=l.bbox, off=dis.has(l.id)?" off":"", ss=(sel===l.id)?" sel":"";
     const st='left:'+(b.x*scale)+'px;top:'+(b.y*scale)+'px;width:'+(b.width*scale)+'px;height:'+(b.height*scale)+'px';
+    const fxc=(l.fx&&FX_BASE[l.fx])?(' '+FX_BASE[l.fx]):'';
     const td=l.textData;
     if(td && td.asText){   // chu that -> hien text ngay trong preview (WYSIWYG)
-      html+='<div class="lyr txt'+off+ss+'" data-id="'+l.id+'" style="'+st
+      html+='<div class="lyr txt'+off+ss+fxc+'" data-id="'+l.id+'" style="'+st
         +';display:flex;align-items:center;justify-content:center;text-align:center;overflow:hidden'
         +';font-weight:700;line-height:1.15;white-space:pre-wrap;font-size:'+((td.size||20)*scale)+'px;color:'+(td.color||'#fff')+'">'+esc(td.content||'')+'</div>';
     }else{
-      html+='<img class="lyr'+off+ss+'" data-id="'+l.id+'" src="'+l.asset+'" loading="lazy" style="'+st+'">';
+      html+='<img class="lyr'+off+ss+fxc+'" data-id="'+l.id+'" src="'+l.asset+'" loading="lazy" style="'+st+'">';
+      if(!off && l.fx && FX_SHINE.has(l.fx))   // lop anh phu luot sang (demo)
+        html+='<img class="lyr-fxshine" src="'+l.asset+'" style="'+st+'">';
     }
   });
   v.sections.forEach((s,i)=>{ if(i===0)return;
@@ -1677,8 +1898,31 @@ function ensurePanel(){
     +'<div class="r">Hành động<select id="sAct">'
     +LINK_ACTIONS.map(a=>'<option value="'+a[0]+'"'+(((lk.action)||'')===a[0]?' selected':'')+'>'+a[1]+'</option>').join('')
     +'</select><label style="cursor:pointer"><input type="checkbox" id="sBtn"'+(lk.button?' checked':'')+'> là nút</label></div>'
-    +'<div class="r"><input id="sUrl" value="'+esc(lk.url||'')+'" placeholder="https://… (URL thật)" style="width:100%"></div>'
-    +'<div class="r">Alt<input id="sAlt" value="'+esc(l.alt||'')+'" placeholder="mô tả ảnh (SEO)" style="flex:1;min-width:120px"></div>';
+    +'<div class="r"><input id="sUrl" value="'+esc(lk.url||'')+'" placeholder="https://… (URL thật)" style="width:100%"></div>';
+  // --- MỞ POPUP (chỉ ở tab desktop/mobile, khi dự án có PSD popup) ---
+  const pops=(curTab.indexOf('popup:')===0)?[]:popupsList();
+  if(pops.length){
+    h+='<div class="r" title="Click layer này (khi xuất web) sẽ mở popup đã chọn">'
+      +'&#129525; Mở popup<select id="sPopup" style="flex:1;min-width:120px"><option value="">(không)</option>'
+      +pops.map(p=>'<option value="'+esc(p.id)+'"'+((lk.popup||'')===p.id?' selected':'')+'>'+esc(p.name)+'</option>').join('')
+      +'</select></div>';
+  }
+  h+='<div class="r">Alt<input id="sAlt" value="'+esc(l.alt||'')+'" placeholder="mô tả ảnh (SEO)" style="flex:1;min-width:120px"></div>';
+  // --- TÊN FILE XUẤT (đổi tên ảnh trong web xuất ra) ---
+  const fdef=((l.asset||'').split('/').pop()||'').replace(/\.[^.]+$/,'');   // ten mac dinh (khong ext)
+  const fext=(((l.asset||'').match(/\.[^.]+$/)||['.webp'])[0]);
+  h+='<div class="grpttl">Tên file xuất</div>'
+    +'<div class="r"><input id="sFname" value="'+esc(l.fname||'')+'" placeholder="'+esc(fdef)+'" style="flex:1;min-width:120px"><span style="color:var(--muted);font-size:12px">'+esc(fext)+'</span></div>'
+    +'<div class="r" style="color:var(--muted);font-size:11.5px;margin-top:-4px">Để trống = giữ mặc định (<b>'+esc(fdef+fext)+'</b>). Dấu/khoảng trắng sẽ tự chuẩn hoá.</div>';
+  // --- HIỆU ỨNG (gán tay cho từng layer, chỉ áp khi xuất React/Next) ---
+  const FX_OPTS=[['','(không)'],['shine','Lướt sáng (vệt sáng lướt qua)'],
+    ['shine-glow','Lướt sáng + phát sáng (như Mở Lối Xưng Bá)'],['glow','Phát sáng (quầng vàng)'],
+    ['float','Trôi nhẹ lên xuống'],['float-glow','Trôi + phát sáng'],['btn','Nút: lướt sáng + hover to + glow']];
+  h+='<div class="grpttl">&#10024; Hiệu ứng (React/Next)</div>'
+    +'<div class="r"><select id="sFx" style="flex:1;min-width:150px">'
+    +FX_OPTS.map(o=>'<option value="'+o[0]+'"'+((l.fx||'')===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')
+    +'</select></div>'
+    +'<div class="r" style="color:var(--muted);font-size:11.5px;margin-top:-4px">Gán tay sẽ tự áp khi Xuất React/Next (không cần bật ô hiệu ứng chung). Lướt sáng đẹp nhất cho chữ tiêu đề.</div>';
   p.innerHTML=h;
   syncNums();
   ['sX','sY','sW','sH'].forEach(k=>{ document.getElementById(k).onchange=onNumChange; });
@@ -1697,9 +1941,14 @@ function ensurePanel(){
     l.link.action=document.getElementById('sAct').value||null;
     l.link.url=document.getElementById('sUrl').value.trim()||null;
     l.link.button=document.getElementById('sBtn').checked;
-    saveEdit(l.id,{link:{action:l.link.action,url:l.link.url,button:l.link.button}}); };
-  ['sAct','sUrl','sBtn'].forEach(k=>document.getElementById(k).onchange=upL);
+    const sp=document.getElementById('sPopup'); if(sp) l.link.popup=sp.value||null;
+    saveEdit(l.id,{link:{action:l.link.action,url:l.link.url,button:l.link.button,popup:l.link.popup||null}}); };
+  ['sAct','sUrl','sBtn','sPopup'].forEach(k=>{ const el=document.getElementById(k); if(el) el.onchange=upL; });
   document.getElementById('sAlt').onchange=()=>{ l.alt=document.getElementById('sAlt').value; saveEdit(l.id,{alt:l.alt}); };
+  const sf=document.getElementById('sFname');
+  if(sf) sf.onchange=()=>{ const v=sf.value.trim(); l.fname=v; saveEdit(l.id,{fname:v||null}); };
+  const sfx=document.getElementById('sFx');
+  if(sfx) sfx.onchange=()=>{ l.fx=sfx.value; saveEdit(l.id,{fx:l.fx||null}); render(); };
 }
 function syncNums(){ const l=curLayer(); if(!l) return; const b=l.bbox;
   const set=(k,val)=>{const el=document.getElementById(k); if(el && document.activeElement!==el) el.value=Math.round(val);};
@@ -1754,7 +2003,9 @@ document.getElementById("grpDo").onclick=()=>{
   doGroup(ids, nm);
 };
 async function doGroup(members, name){
-  if((members||[]).length<2){ alert("Hãy chọn ít nhất 2 ảnh để gộp."); return; }
+  // BO layer da AN (tat mat) khoi phep gop -> khong dinh anh an vao ban ghep
+  members=(members||[]).filter(id=>!disabled[curTab].has(id));
+  if(members.length<2){ alert("Hãy chọn ít nhất 2 ảnh (đang hiện) để gộp."); return; }
   const btn=document.getElementById("grpDo"); if(btn) btn.disabled=true;
   try{
     const r=await fetch("/group",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -1787,7 +2038,7 @@ const goReview=document.getElementById("goReview"), reviewBox=document.getElemen
 let reviewUrl=null;
 goReview.onclick=async()=>{
   const body={ job_id:JOB, swiper:document.getElementById("swiper").checked,
-    disabled_desktop:[...disabled.desktop], disabled_mobile:[...disabled.mobile] };
+    disabled_desktop:[...(disabled.desktop||[])], disabled_mobile:[...(disabled.mobile||[])] };
   goReview.disabled=true; reviewBox.style.display="block"; reviewErr.textContent="";
   reviewBar.style.display="block"; reviewFrame.style.display="none"; reviewOpen.style.display="none";
   reviewStep.textContent="Đang gửi yêu cầu…";
@@ -1819,8 +2070,9 @@ goExport.onclick=async()=>{
   const lang=(document.querySelector('input[name=lang]:checked')||{}).value||'js';
   const body={ job_id:JOB, format:fmt, lang:lang,
     swiper:document.getElementById("swiper").checked,
-    disabled_desktop:[...disabled.desktop], disabled_mobile:[...disabled.mobile] };
-  ["swiper_lib","env_config","nav_menu","popups","ai_enhance","fluid"].forEach(k=>body[k]=document.getElementById(k).checked);
+    disabled_desktop:[...(disabled.desktop||[])], disabled_mobile:[...(disabled.mobile||[])],
+    disabled_popup:disabledPopupMap() };
+  ["swiper_lib","env_config","nav_menu","popups","ai_enhance","fluid","fx","fx_reveal"].forEach(k=>body[k]=document.getElementById(k).checked);
   goExport.disabled=true; exportPanel.classList.add("show");
   exProgress.style.display="block"; result.style.display="none"; exStep.textContent="Đang gửi yêu cầu…";
   exportPanel.scrollIntoView({behavior:"smooth",block:"start"});
