@@ -145,7 +145,7 @@
 
 .layerOrderActions{
   display:grid;
-  grid-template-columns:1fr 1fr 44px;
+  grid-template-columns:1fr 1fr;
   gap:6px;
 }
 
@@ -159,7 +159,10 @@
   white-space:nowrap;
 }
 
-.layerOrderActions .iconAction{font-family:ui-monospace,monospace}
+.layerOrderActions .iconAction{
+  grid-column:1 / -1;
+  font-family:ui-monospace,monospace;
+}
 
 .fullField{width:100%}
 .fullField textarea{resize:vertical}

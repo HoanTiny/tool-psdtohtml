@@ -285,6 +285,7 @@ def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id, fx_aut
         item = {"id": l["id"], "src": _src(l["asset"], asset_dir),
                 "x": b["x"] - ax, "y": b["y"] - ay, "w": b["width"], "h": b["height"],
                 "o": l.get("opacity", 1), "blend": l.get("blend"),
+                "hidden": l.get("visible", True) is False,
                 "alt": (l.get("alt") or _alt_of(l)),
                 # popup: LUON dat href="#" de click roi vao openAction -> setPopup (khong dieu huong URL)
                 "href": ("#" if popup else (lk.get("url") or ("#" if is_btn else None))),
@@ -477,7 +478,7 @@ def _gen_types():
     return (
         "export interface LayerItem {\n"
         "  id: string; src: string; x: number; y: number; w: number; h: number;\n"
-        "  o: number; blend?: string | null; alt?: string; cls?: string;\n"
+        "  o: number; blend?: string | null; alt?: string; cls?: string; hidden?: boolean;\n"
         "  href?: string | null; act?: string | null; menu?: boolean; toggle?: boolean;\n"
         "  asText?: boolean; text?: string; tsize?: number; tcolor?: string; lcp?: boolean; fx?: string;\n}\n\n"
         "export interface FixedItem {\n"
@@ -827,6 +828,8 @@ def _tw_cls(it, block=True):
     """Sinh chuoi class Tailwind THUAN cho 1 layer (thay inline style). Tailwind JIT
     quet duoc class literal ke ca khi nam trong mang data trong file .tsx."""
     parts = ["absolute"]
+    if it.get("hidden"):
+        parts.append("hidden")
     if it.get("asText"):
         parts += ["flex", "items-center", "justify-center", "text-center", "font-bold",
                   "leading-tight", "whitespace-pre-wrap", "overflow-hidden"]
@@ -855,6 +858,8 @@ def _flat_json(items):
              "w": it["w"], "h": it["h"], "o": it["o"], "alt": it["alt"]}
         if it.get("blend"):
             o["blend"] = it["blend"]
+        if it.get("hidden"):
+            o["hidden"] = True
         if it.get("href"):
             o["href"] = it["href"]
         if it.get("act"):
@@ -883,7 +888,8 @@ def _mark_lcp(board):
     secs = board.get("sections", [])
     if secs:
         cands += [it for it in secs[0].get("flat", []) if not it.get("asText")]
-    cands = [it for it in cands if it.get("src") and not it.get("asText")]
+    cands = [it for it in cands
+             if it.get("src") and not it.get("asText") and not it.get("hidden")]
     if cands:
         max(cands, key=lambda it: it.get("w", 0) * it.get("h", 0))["lcp"] = True
 
@@ -1024,6 +1030,11 @@ _LANDING_EFFECT = r'''  useEffect(() => {
       if (href && href !== "#") return;   // link that -> dieu huong tu nhien
       e.preventDefault();
       const act = a.getAttribute("data-action") || "other";
+      if (act.indexOf("scroll:") === 0) {
+        const target = secs[Number.parseInt(act.slice(7), 10)];
+        if (target) window.scrollTo({ top: Math.max(0, topOf(target) - 4), behavior: "smooth" });
+        return;
+      }
       const url = LINKS[act];
       if (url) { window.open(url, "_blank", "noopener,noreferrer"); return; }
       openAction(act);
@@ -1089,6 +1100,7 @@ _LANDING_SWIPER_EFFECT = r'''  const ref = useRef(null); const stageRef = useRef
     const onClick = (e) => { const a = e.target.closest(".hot"); if (!a || !deck.contains(a)) return;
       const href = a.getAttribute("href"); if (href && href !== "#") return; e.preventDefault();
       const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
+      if (act.indexOf("scroll:") === 0) { go(Number.parseInt(act.slice(7), 10)); return; }
       if (url) { window.open(url, "_blank", "noopener,noreferrer"); return; }
       openAction(act); };
     document.addEventListener("click", onClick);
@@ -1125,6 +1137,10 @@ _LANDING_SWIPERLIB_EFFECT = r'''  useEffect(() => {
     const onClick = (e) => { const a = (e.target__ASH__).closest(".hot"); if (!a || !root.contains(a)) return;
       const href = a.getAttribute("href"); if (href && href !== "#") return; e.preventDefault();
       const act = a.getAttribute("data-action") || "other"; const url = LINKS[act];
+      if (act.indexOf("scroll:") === 0) {
+        if (swiperRef.current) swiperRef.current.slideTo(Number.parseInt(act.slice(7), 10));
+        return;
+      }
       if (url) { window.open(url, "_blank", "noopener,noreferrer"); return; }
       openAction(act); };
     root.addEventListener("click", onClick);
@@ -1838,7 +1854,8 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
     if mobile:
         _copy_assets(mobile["dir"], proj, "assets-m")
     for p in (popups or []):   # moi popup: assets rieng /assets-<id>
-        _copy_assets(p["dir"], proj, f"assets-{p['id']}")
+        if p.get("dir"):        # popup noi bo dung chung assets desktop/mobile
+            _copy_assets(p["dir"], proj, f"assets-{p['id']}")
     _write_readme(proj, board, mobile, "npm run dev", lang)
     return proj
 
@@ -1960,7 +1977,8 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None,
     if mobile:
         _copy_assets(mobile["dir"], proj, "assets-m")
     for p in (popups or []):   # moi popup: assets rieng /assets-<id>
-        _copy_assets(p["dir"], proj, f"assets-{p['id']}")
+        if p.get("dir"):
+            _copy_assets(p["dir"], proj, f"assets-{p['id']}")
     _write_readme(proj, board, mobile, "npm run dev", lang)
     return proj
 
@@ -1991,15 +2009,73 @@ def _dext(lang):
 
 # ================= entry =================
 
-def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False, feats=None, lang="js", model=None):
+def _inline_popups(layout, asset_dir, prefix):
+    """Tach cac group con cua folder `popup` thanh popup render doc lap."""
+    by_id, children = _index(layout)
+    roots = [
+        layer for layer in layout.get("layers") or []
+        if layer.get("kind") == "group" and _norm_name(layer.get("name")) == "popup"
+    ]
+    popups, consumed = [], set()
+    for root in roots:
+        for group_id in children.get(root["id"], []):
+            group = by_id[group_id]
+            if group.get("kind") != "group":
+                continue
+            member_layers = _leaves(group_id, by_id, children)
+            if not member_layers:
+                continue
+            members = []
+            for source in member_layers:
+                item = dict(source)
+                # Bo trang thai an cua chinh group popup va folder `popup`, nhung
+                # van ton trong thai an rieng cua layer/group nam ben trong no.
+                visible = True
+                current = source
+                while current and current.get("id") != group_id:
+                    if current.get("visible_self", True) is False:
+                        visible = False
+                        break
+                    current = by_id.get(current.get("parent"))
+                item["visible"] = visible
+                members.append(item)
+
+            bbox = dict(group.get("bbox") or {})
+            if bbox.get("width", 0) <= 0 or bbox.get("height", 0) <= 0:
+                xs = [item["bbox"]["x"] for item in members]
+                ys = [item["bbox"]["y"] for item in members]
+                x2 = [item["bbox"]["x"] + item["bbox"]["width"] for item in members]
+                y2 = [item["bbox"]["y"] + item["bbox"]["height"] for item in members]
+                bbox = {"x": min(xs), "y": min(ys),
+                        "width": max(x2) - min(xs), "height": max(y2) - min(ys)}
+            flat = _build_flat(
+                members, bbox, set(), asset_dir, set(), None, fx_auto=False
+            )
+            if not flat:
+                continue
+            popups.append({
+                "id": f"inline-{prefix}-{group_id}",
+                "name": group.get("name") or group_id,
+                "w": bbox["width"], "h": bbox["height"],
+                "flat": flat, "source": "inline",
+            })
+            consumed.update(item["id"] for item in member_layers)
+    return popups, consumed
+
+
+def _load_variant(vdir, asset_dir, comp_prefix, detect_repeats=False, feats=None,
+                  lang="js", model=None, inline_prefix=None):
     feats = feats or {}
     vdir = Path(vdir)
     layout = json.loads((vdir / "layout.json").read_text(encoding="utf-8"))
     # Thanh CO DINH (nav/logo lap giua cac section) -> tach thanh FixedNav, render 1 lan.
     from .fixed_overlay import detect_fixed_overlay
     fixed_items, drop_ids = detect_fixed_overlay(vdir, layout)
-    board = _artboards_from_layout(layout, asset_dir, comp_prefix, extra_exclude=drop_ids,
+    inline, inline_ids = _inline_popups(layout, asset_dir, inline_prefix) if inline_prefix else ([], set())
+    board = _artboards_from_layout(layout, asset_dir, comp_prefix,
+                                   extra_exclude=drop_ids | inline_ids,
                                    detect_repeats=detect_repeats, fx_auto=bool(feats.get("fx")))
+    board["_inline_popups"] = inline
     fx, navk = [], 0
     for it in fixed_items:
         # muc menu bam duoc: chu ngan (loai logo to, icon chuot cao, duong ke mong)
@@ -2038,15 +2114,23 @@ def export(out_dir, framework="react", lang="js", mobile_dir=None, detect_repeat
     if feats.get("swiper_lib"):
         swiper = True
     feats["swiper"] = swiper
-    layout, board = _load_variant(out_dir, "assets", "", detect_repeats, feats=feats, lang=lang)
+    layout, board = _load_variant(
+        out_dir, "assets", "", detect_repeats, feats=feats, lang=lang,
+        inline_prefix="desktop",
+    )
     mobile = None
     if mobile_dir:
-        m_layout, m_board = _load_variant(mobile_dir, "assets-m", "M", detect_repeats, feats=feats, lang=lang)
+        m_layout, m_board = _load_variant(
+            mobile_dir, "assets-m", "M", detect_repeats, feats=feats, lang=lang,
+            inline_prefix="mobile",
+        )
         mobile = {"dir": Path(mobile_dir), "layout": m_layout, "board": m_board}
 
     # POPUP tu PSD: moi popup = 1 board rieng (assets rieng /assets-<id>), render theo
     # layer trong modal. popup_dirs = [{"id","name","dir"}]. Khong ai_enhance/repeat cho popup.
-    popups = []
+    popups = list(board.pop("_inline_popups", []))
+    if mobile:
+        popups.extend(mobile["board"].pop("_inline_popups", []))
     for pinfo in (popup_dirs or []):
         pid = pinfo["id"]
         p_layout, p_board = _load_variant(pinfo["dir"], f"assets-{pid}", pid.upper(),

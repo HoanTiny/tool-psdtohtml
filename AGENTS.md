@@ -21,8 +21,14 @@ python -m venv venv
 venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-There is no test suite, linter, or build step configured in this repo. `make_sample_psd.py` generates a
-synthetic PSD for manual testing (needs the optional `pytoshop`/`six` deps from `requirements.txt`).
+The regression suite uses stdlib `unittest` (no extra test dependency):
+
+```powershell
+venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+There is no linter or root build step configured in this repo. `make_sample_psd.py` generates a synthetic
+PSD for manual testing (needs the optional `pytoshop`/`six` deps from `requirements.txt`).
 
 Run the pipeline from the CLI:
 

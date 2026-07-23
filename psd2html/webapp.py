@@ -21,16 +21,24 @@ import json
 import socket
 import atexit
 import subprocess
+import secrets
+import uuid
+import time
+from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
+from xml.etree import ElementTree
 
 from flask import (Flask, request, jsonify, send_from_directory, send_file,
-                   abort, render_template)
+                   abort, render_template, redirect)
 from werkzeug.utils import secure_filename
 
 from .parser import parse_psd
 from .merge import parse_and_merge
 from .render_slices import render as render_slices
 from .export_web import export as export_web
+from .ba_flow import (BAFlowError, SUPPORTED_EXTENSIONS, build_flow_spec,
+                      extract_document, normalize_name)
 
 app = Flask(__name__)
 # Tool chay local: UI dang phat trien phai cap nhat ngay khi reload trinh duyet.
@@ -46,6 +54,30 @@ app.config["MAX_CONTENT_LENGTH"] = _max_mb * 1024 * 1024
 BASE = Path(__file__).resolve().parent.parent
 JOBS_DIR = BASE / "output_web"
 JOBS_DIR.mkdir(exist_ok=True)
+
+# Khi mo webapp ra LAN, token ngan nguoi la truy cap/sua/tai job cua nhau.
+# De trong khi chi chay localhost. main() se tu sinh token neu bind ra LAN.
+_ACCESS_TOKEN = _os.environ.get("PSD2HTML_ACCESS_TOKEN", "").strip()
+_AUTH_COOKIE = "psd2html_access"
+
+
+@app.before_request
+def _require_access_token():
+    """Xac thuc nhe cho demo LAN bang link co token -> cookie HttpOnly."""
+    if not _ACCESS_TOKEN:
+        return None
+    supplied = request.args.get("token")
+    if supplied and secrets.compare_digest(supplied, _ACCESS_TOKEN):
+        response = redirect(request.path or "/")
+        response.set_cookie(_AUTH_COOKIE, _ACCESS_TOKEN, max_age=12 * 3600,
+                            httponly=True, samesite="Strict")
+        return response
+    cookie = request.cookies.get(_AUTH_COOKIE, "")
+    if cookie and secrets.compare_digest(cookie, _ACCESS_TOKEN):
+        return None
+    return jsonify({
+        "error": "Can token truy cap. Mo link LAN co ?token=... do server in ra."
+    }), 401
 
 
 # LUON tra JSON khi loi (thay vi trang HTML) de frontend hien duoc thong bao.
@@ -65,12 +97,179 @@ def _server_error(e):
     return jsonify({"error": f"Loi server: {getattr(e, 'description', e)}"}), 500
 
 jobs = {}          # job_id -> {phase, status, step, error, manifest, ...}
-_counter = [0]
+_JOB_LOCKS = {}
+_JOB_LOCKS_GUARD = threading.Lock()
+_JOB_TTL_DAYS = max(0, int(_os.environ.get("PSD2HTML_JOB_TTL_DAYS", "7")))
 
 
 def _new_job_id():
-    _counter[0] += 1
-    return f"job{_counter[0]}"
+    """ID khong doan duoc va khong trung thu muc cu sau khi server restart."""
+    while True:
+        job_id = uuid.uuid4().hex
+        with _JOB_LOCKS_GUARD:
+            if job_id not in jobs and not (JOBS_DIR / job_id).exists():
+                return job_id
+
+
+def _job_lock(job_id):
+    """Tra lock rieng cua job, bao ve cac thao tac co ghi file."""
+    with _JOB_LOCKS_GUARD:
+        return _JOB_LOCKS.setdefault(job_id, threading.Lock())
+
+
+def _safe_job_dir(job_id):
+    """Tra thu muc job an toan, chan traversal va junction/symlink ra ngoai."""
+    if not isinstance(job_id, str) or not (1 <= len(job_id) <= 64):
+        return None
+    if not all(c.isalnum() or c in "-_" for c in job_id):
+        return None
+    candidate = JOBS_DIR / job_id
+    try:
+        root = JOBS_DIR.resolve()
+        resolved = candidate.resolve()
+        if resolved.parent != root:
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
+def _job_disk_stats(jdir):
+    """Tinh dung luong va moc sua moi nhat; bo qua symlink de khong thoat root."""
+    total = 0
+    latest = jdir.stat().st_mtime
+    for p in jdir.rglob("*"):
+        try:
+            if p.is_symlink():
+                continue
+            st = p.stat()
+            latest = max(latest, st.st_mtime)
+            if p.is_file():
+                total += st.st_size
+        except OSError:
+            continue
+    return total, latest
+
+
+def _job_summary(jdir):
+    job_id = jdir.name
+    size, updated = _job_disk_stats(jdir)
+    state = jobs.get(job_id) or {}
+    sources = []
+    ddir = jdir / "d"
+    if ddir.is_dir():
+        sources = sorted(p.name for p in ddir.iterdir() if p.is_file())
+    ready = (jdir / "out" / "layout.json").is_file()
+    status = state.get("status") or ("done" if ready else "incomplete")
+    return {
+        "id": job_id,
+        "sources": sources[:6],
+        "source_count": len(sources),
+        "size": size,
+        "updated_at": datetime.fromtimestamp(updated, timezone.utc).isoformat(),
+        "status": status,
+        "phase": state.get("phase") or ("ready" if ready else "unknown"),
+        "step": state.get("step") or ("San sang chinh sua" if ready else "Chua hoan tat"),
+        "format": state.get("format"),
+        "ready": ready,
+        "busy": _job_lock(job_id).locked(),
+        "download": (jdir / "result.zip").is_file(),
+    }
+
+
+def _delete_job(job_id):
+    """Xoa 1 job khi khong co task ghi; tra (ok, ly_do)."""
+    jdir = _safe_job_dir(job_id)
+    if not jdir or not jdir.is_dir():
+        return False, "Job khong ton tai."
+    lock = _job_lock(job_id)
+    if not lock.acquire(blocking=False):
+        return False, "Job dang chay, khong the xoa."
+    try:
+        _kill_preview(job_id)
+        try:
+            shutil.rmtree(jdir)
+        except OSError as e:
+            return False, f"Khong xoa duoc job: {e}"
+    finally:
+        lock.release()
+    jobs.pop(job_id, None)
+    with _JOB_LOCKS_GUARD:
+        _JOB_LOCKS.pop(job_id, None)
+    return True, None
+
+
+def _cleanup_old_jobs(days=None):
+    """Xoa job qua han; days=0 thi tat auto cleanup."""
+    days = _JOB_TTL_DAYS if days is None else max(0, int(days))
+    if days <= 0:
+        return []
+    cutoff = time.time() - days * 86400
+    removed = []
+    for jdir in list(JOBS_DIR.iterdir()):
+        if not jdir.is_dir() or not _safe_job_dir(jdir.name):
+            continue
+        try:
+            _, latest = _job_disk_stats(jdir)
+        except OSError:
+            continue
+        if latest >= cutoff:
+            continue
+        ok, _ = _delete_job(jdir.name)
+        if ok:
+            removed.append(jdir.name)
+    return removed
+
+
+def _busy_response():
+    return jsonify({
+        "error": "Job dang chay mot tac vu khac. Vui long doi tac vu hien tai hoan tat."
+    }), 409
+
+
+def _start_job_task(job_id, target, args=(), before_start=None):
+    """Chi cho mot parse/export/preview/build ghi tren cung job tai mot thoi diem."""
+    lock = _job_lock(job_id)
+    if not lock.acquire(blocking=False):
+        return False
+
+    try:
+        if before_start:
+            before_start()
+    except Exception:
+        lock.release()
+        raise
+
+    def run():
+        try:
+            target(*args)
+        finally:
+            lock.release()
+
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception:
+        lock.release()
+        raise
+    return True
+
+
+def _serialize_job_route(func):
+    """Khoa cac endpoint ghi dong bo (edit/group) cung lock voi task nen."""
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        data = request.get_json(silent=True) or {}
+        job_id = data.get("job_id")
+        if not job_id:
+            return func(*args, **kwargs)
+        lock = _job_lock(job_id)
+        if not lock.acquire(blocking=False):
+            return _busy_response()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            lock.release()
+    return wrapped
 
 
 # Muc chat luong anh -> (fmt, webp_quality, webp_lossless_max)
@@ -134,6 +333,21 @@ def _load_edits(vdir):
 
 def _save_edits(vdir, edits):
     _edits_path(vdir).write_text(json.dumps(edits, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _flow_spec_path(job_id):
+    return JOBS_DIR / job_id / "out" / "flow-spec.json"
+
+
+def _load_flow_spec(job_id):
+    path = _flow_spec_path(job_id)
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def _save_flow_spec(job_id, spec):
+    _flow_spec_path(job_id).write_text(
+        json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 # Khoa ghi edits.json: FE co the ban nhieu /edit gan nhu dong thoi (vd doi link +
@@ -281,6 +495,7 @@ def _effective_layout(vdir):
         pos = min(idxs) if idxs else len(layout["layers"])
         node = {"id": gid, "name": g.get("name") or gid, "kind": "pixel",
                 "bbox": ubbox, "opacity": 1.0,
+                "visible": any(m.get("visible", True) for m in members),
                 "parent": (members[0].get("parent") if members else None),  # giu trong folder goc
                 "asset": asset_rel, "grouped": [m["id"] for m in members]}
         layout["layers"] = ([l for l in layout["layers"][:pos] if l["id"] not in mset]
@@ -350,7 +565,50 @@ def _collect_psd_groups(layout):
     return groups[:60]
 
 
-def _variant_manifest(job_id, vdir, url_prefix):
+def _inline_popup_groups(layout, prefix):
+    """Moi group con truc tiep cua folder ten `popup` la mot popup noi bo."""
+    from collections import defaultdict
+    children = defaultdict(list)
+    by_id = {}
+    for layer in layout.get("layers") or []:
+        by_id[layer["id"]] = layer
+        children[layer.get("parent")].append(layer)
+
+    def leaves(group_id):
+        out = []
+        for child in children.get(group_id, []):
+            if child.get("kind") == "group":
+                out.extend(leaves(child["id"]))
+            elif child.get("asset"):
+                out.append(child["id"])
+        return out
+
+    roots = [
+        layer for layer in layout.get("layers") or []
+        if layer.get("kind") == "group"
+        and _norm_group_name(layer.get("name")) == "popup"
+    ]
+    result = []
+    seen = set()
+    for root in roots:
+        for group in children.get(root["id"], []):
+            if group.get("kind") != "group" or group["id"] in seen:
+                continue
+            members = leaves(group["id"])
+            if not members:
+                continue
+            seen.add(group["id"])
+            result.append({
+                "id": f"inline-{prefix}-{group['id']}",
+                "name": group.get("name") or group["id"],
+                "groupId": group["id"],
+                "count": len(members),
+                "source": "inline",
+            })
+    return result
+
+
+def _variant_manifest(job_id, vdir, url_prefix, inline_prefix=None):
     """
     Doc layout HIEU LUC (pristine + group) cua 1 bien the -> manifest cho frontend:
     canvas, section, tung ANH (layer co asset) kem section index, group hien co, goi y.
@@ -385,6 +643,7 @@ def _variant_manifest(job_id, vdir, url_prefix):
             "kind": l.get("kind"),
             "parent": l.get("parent"),         # id folder cha (dựng cây kiểu PTS)
             "order": order_of.get(l["id"], 0),  # vi tri trong PSD (ve: nho=duoi/nen)
+            "visible": l.get("visible", True),
             "bbox": b,
             "asset": base + l["asset"],
             "text": bool(tx.get("content")),
@@ -417,18 +676,20 @@ def _variant_manifest(job_id, vdir, url_prefix):
         "groups": _load_groups(vdir),
         "suggestions": _suggest_groups(layout),
         "psdGroups": psd_groups,
+        "inlinePopups": _inline_popup_groups(layout, inline_prefix) if inline_prefix else [],
         # cac node FOLDER (group PSD) de dung cay layer kieu Photoshop (kem order)
         "nodes": [{"id": l["id"], "name": (l.get("name") or l["id"]), "parent": l.get("parent"),
-                   "order": order_of.get(l["id"], 0)}
+                   "visible": l.get("visible", True), "order": order_of.get(l["id"], 0)}
                   for l in layout["layers"] if l.get("kind") == "group"],
     }
 
 
 def _build_manifest(job_id):
     out = JOBS_DIR / job_id / "out"
-    man = {"desktop": _variant_manifest(job_id, out, ""), "mobile": None, "popups": []}
+    man = {"desktop": _variant_manifest(job_id, out, "", "desktop"),
+           "mobile": None, "popups": [], "inlinePopups": []}
     if (out / "_mobile" / "layout.json").exists():
-        man["mobile"] = _variant_manifest(job_id, out / "_mobile", "_mobile/")
+        man["mobile"] = _variant_manifest(job_id, out / "_mobile", "_mobile/", "mobile")
     pdir = out / "_popups"
     if pdir.exists():
         for d in sorted(pdir.iterdir()):
@@ -438,6 +699,9 @@ def _build_manifest(job_id):
             vm = _variant_manifest(job_id, d, f"_popups/{pid}/")
             nm = (d / "name.txt").read_text(encoding="utf-8").strip() if (d / "name.txt").exists() else pid
             man["popups"].append({"id": pid, "name": nm, **vm})
+    man["inlinePopups"] = list(man["desktop"].get("inlinePopups") or [])
+    if man.get("mobile"):
+        man["inlinePopups"].extend(man["mobile"].get("inlinePopups") or [])
     return man
 
 
@@ -623,12 +887,16 @@ def _run_export(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m, disabl
             job["files"] = []
             zip_src = out
             zip_include = ["index.html", "style.css", "assets", "sections"]
+            if (out / "flow-spec.json").exists():
+                zip_include.append("flow-spec.json")
             asset_names = _used_asset_names(out)   # chi zip anh dang dung
         else:
             proj = export_web(str(out), framework=fmt, lang=lang,
                               mobile_dir=str(mobile_dir) if has_mobile else None,
                               detect_repeats=feats.get("fluid", False),
                               swiper=swiper, feats=feats, popup_dirs=popup_dirs)
+            if (out / "flow-spec.json").exists():
+                shutil.copy2(out / "flow-spec.json", Path(proj) / "flow-spec.json")
             # bo anh thua (layer an / thanh vien da gop) khoi ban copy trong project
             _prune_assets(Path(proj) / "public" / "assets", _used_asset_names(out))
             if has_mobile:
@@ -689,7 +957,7 @@ def _run_preview(job_id, swiper, disabled_d, disabled_m):
 # react/next KHONG the xem truoc bang HTML thuan (can bundler). Nut "Build & Xem
 # truoc" se: npm install (neu chua co node_modules) -> npm run build -> chay server
 # tinh (vite preview / next start) tren 1 cong rieng, roi frontend nhung iframe tro
-# thang vao http://127.0.0.1:<cong> (giu nguyen duong dan tuyet doi /assets/...).
+# thang vao server do (localhost hoac IP LAN; giu duong dan tuyet doi /assets/...).
 #
 # Moi job giu 1 tien trinh server; build lai se kill cai cu truoc.
 PREVIEW_SERVERS = {}   # job_id -> {"proc": Popen, "port": int, "fmt": str}
@@ -703,6 +971,30 @@ def _free_port():
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+def _is_lan_host(host=None):
+    host = host or _os.environ.get("PSD2HTML_HOST", "127.0.0.1")
+    return host not in ("127.0.0.1", "localhost", "::1")
+
+
+def _preview_public_host():
+    """IP/hostname de may test trong LAN mo server preview React/Next."""
+    configured = _os.environ.get("PSD2HTML_PUBLIC_HOST", "").strip()
+    if configured:
+        return configured
+    host = _os.environ.get("PSD2HTML_HOST", "127.0.0.1")
+    if host not in ("0.0.0.0", "::", ""):
+        return host
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return "127.0.0.1"
 
 
 def _port_alive(port, timeout=0.5):
@@ -807,11 +1099,13 @@ def _run_build_preview(job_id, fmt):
         # 3) chay server xem truoc tren cong rieng
         _kill_preview(job_id)
         port = _free_port()
+        lan_preview = _is_lan_host()
+        bind_host = "0.0.0.0" if lan_preview else "127.0.0.1"
         if fmt == "next":
-            cmd = [_NPM, "start", "--", "-p", str(port)]
+            cmd = [_NPM, "start", "--", "-p", str(port), "-H", bind_host]
         else:  # react / vite
             cmd = [_NPM, "run", "preview", "--", "--port", str(port),
-                   "--strictPort", "--host", "127.0.0.1"]
+                   "--strictPort", "--host", bind_host]
         b["step"] = f"Khoi dong server (cong {port})..."
         proc = subprocess.Popen(cmd, cwd=str(proj),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -829,7 +1123,8 @@ def _run_build_preview(job_id, fmt):
         else:
             raise RuntimeError("Server xem truoc khong phan hoi kip.")
 
-        b["url"] = f"http://127.0.0.1:{port}/"
+        public_host = _preview_public_host() if lan_preview else "127.0.0.1"
+        b["url"] = f"http://{public_host}:{port}/"
         b["step"] = "San sang"
         b["status"] = "done"
     except Exception as e:
@@ -935,8 +1230,9 @@ def parse():
     jobs[job_id] = {"phase": "parse", "status": "running", "step": "Bat dau...",
                     "sections": len(d_paths), "error": None, "manifest": None,
                     "preview": None, "download": None, "files": []}
-    threading.Thread(target=_run_parse, args=(job_id, d_paths, m_paths, quality, p_paths),
-                     daemon=True).start()
+    if not _start_job_task(
+            job_id, _run_parse, (job_id, d_paths, m_paths, quality, p_paths)):
+        return _busy_response()
     return jsonify({"job_id": job_id})
 
 
@@ -970,12 +1266,16 @@ def export():
     disabled_m = data.get("disabled_mobile") or []
     disabled_p = data.get("disabled_popup") or {}   # {pid: [layerIds]}
 
-    job.update(phase="export", status="running", format=fmt, lang=lang,
-               step="Bat dau xuat...", error=None, trace=None,
-               preview=None, download=None, files=[])
-    threading.Thread(target=_run_export,
-                     args=(job_id, fmt, lang, swiper, feats, disabled_d, disabled_m, disabled_p),
-                     daemon=True).start()
+    def prepare():
+        job.update(phase="export", status="running", format=fmt, lang=lang,
+                   step="Bat dau xuat...", error=None, trace=None,
+                   preview=None, download=None, files=[])
+
+    if not _start_job_task(
+            job_id, _run_export,
+            (job_id, fmt, lang, swiper, feats, disabled_d, disabled_m, disabled_p),
+            before_start=prepare):
+        return _busy_response()
     return jsonify({"job_id": job_id})
 
 
@@ -993,7 +1293,8 @@ def build_preview():
         return jsonify({"error": "Chi build duoc project react/next. Hay Xuat web truoc."}), 400
     if not (_proj_dir(job_id, fmt) / "package.json").exists():
         return jsonify({"error": "Chua co project. Hay bam Xuat web (react/next) truoc."}), 400
-    threading.Thread(target=_run_build_preview, args=(job_id, fmt), daemon=True).start()
+    if not _start_job_task(job_id, _run_build_preview, (job_id, fmt)):
+        return _busy_response()
     return jsonify({"job_id": job_id})
 
 
@@ -1007,6 +1308,7 @@ def _variant_dir(job_id, variant):
 
 
 @app.route("/group", methods=["POST"])
+@_serialize_job_route
 def group():
     """Gop nhieu layer thanh 1 anh (nhu group PSD). Tra manifest moi de editor ve lai."""
     data = request.get_json(silent=True) or {}
@@ -1039,6 +1341,7 @@ def group():
 
 
 @app.route("/ungroup", methods=["POST"])
+@_serialize_job_route
 def ungroup():
     """Tach 1 group -> tra lai cac layer thanh vien."""
     data = request.get_json(silent=True) or {}
@@ -1062,6 +1365,7 @@ def ungroup():
 
 
 @app.route("/edit", methods=["POST"])
+@_serialize_job_route
 def edit():
     """Luu chinh sua per-layer (bbox/z/text/link/alt). Merge vao edits.json.
     Fire-and-forget tu frontend; export/preview doc lai qua _effective_layout."""
@@ -1094,6 +1398,164 @@ def edit():
     return jsonify({"ok": True})
 
 
+@app.route("/ba-flow/<job_id>")
+def get_ba_flow(job_id):
+    """Lay flow-spec da upload de mo lai job van tiep tuc review duoc."""
+    job = _ensure_job(job_id)
+    if not job:
+        return jsonify({"error": "Job khong ton tai."}), 404
+    return jsonify({"flow": _load_flow_spec(job_id)})
+
+
+@app.route("/ba-flow/upload", methods=["POST"])
+def upload_ba_flow():
+    """Nhan tai lieu BA, trich text va goi y mapping voi layer desktop."""
+    job_id = (request.form.get("job_id") or "").strip()
+    job = _ensure_job(job_id)
+    if not job:
+        return jsonify({"error": "Job khong ton tai. Hay phan tich PSD truoc."}), 400
+    document = request.files.get("document")
+    if not document or not document.filename:
+        return jsonify({"error": "Chua chon tai lieu BA."}), 400
+    name = secure_filename(document.filename) or "ba-document.txt"
+    ext = Path(name).suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        return jsonify({
+            "error": "Chi ho tro TXT, MD, DOCX, XLSX va PDF."
+        }), 400
+    content_length = request.content_length or 0
+    if content_length > 25 * 1024 * 1024:
+        return jsonify({"error": "Tai lieu BA toi da 25 MB."}), 413
+    lock = _job_lock(job_id)
+    if not lock.acquire(blocking=False):
+        return _busy_response()
+    try:
+        ba_dir = JOBS_DIR / job_id / "out" / "_ba"
+        ba_dir.mkdir(parents=True, exist_ok=True)
+        path = ba_dir / name
+        document.save(path)
+        text = extract_document(path)
+        manifest = _build_manifest(job_id)
+        spec = build_flow_spec(text, manifest, document.filename)
+        _save_flow_spec(job_id, spec)
+        job["manifest"] = manifest
+        return jsonify({"flow": spec})
+    except (BAFlowError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    finally:
+        lock.release()
+
+
+def _flow_link(item):
+    action = item.get("action")
+    target = str(item.get("target") or "").strip()
+    if action == "url":
+        if not (target.startswith(("http://", "https://", "/"))):
+            raise BAFlowError("URL phai bat dau bang http://, https:// hoac /.")
+        return {"button": True, "url": target, "popup": None, "action": "custom"}
+    if action == "popup":
+        if not target:
+            raise BAFlowError("Chua chon popup dich.")
+        return {"button": True, "url": None, "popup": target, "action": None}
+    if action == "scroll":
+        try:
+            target_index = int(target)
+        except (TypeError, ValueError) as exc:
+            raise BAFlowError("Chua chon section dich.") from exc
+        return {
+            "button": True, "url": None, "popup": None,
+            "action": f"scroll:{target_index}",
+        }
+    raise BAFlowError("Hanh dong BA khong hop le.")
+
+
+@app.route("/ba-flow/apply", methods=["POST"])
+@_serialize_job_route
+def apply_ba_flow():
+    """Ghi cac mapping da review vao edits desktop va layer mobile cung ten."""
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    job = _ensure_job(job_id)
+    if not job:
+        return jsonify({"error": "Job khong ton tai."}), 400
+    items = [item for item in (data.get("items") or [])
+             if isinstance(item, dict) and item.get("enabled")]
+    if not items:
+        return jsonify({"error": "Chua chon mapping nao de ap dung."}), 400
+    manifest = _build_manifest(job_id)
+    desktop = manifest.get("desktop") or {}
+    desktop_layers = {layer["id"]: layer for layer in desktop.get("layers") or []}
+    popup_ids = {
+        popup["id"] for popup in
+        (manifest.get("popups") or []) + (manifest.get("inlinePopups") or [])
+    }
+    section_count = len(desktop.get("sections") or [])
+    patches = {}
+    applied = []
+    for item in items:
+        layer = desktop_layers.get(item.get("layer_id"))
+        if not layer:
+            continue
+        if item.get("action") == "popup" and item.get("target") not in popup_ids:
+            continue
+        if item.get("action") == "scroll":
+            try:
+                section_index = int(item.get("target"))
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= section_index < section_count:
+                continue
+        try:
+            link = _flow_link(item)
+        except BAFlowError:
+            continue
+        patches[layer["id"]] = {"link": link}
+        item["layer_name"] = layer.get("name") or layer["id"]
+        item["status"] = "applied"
+        applied.append(item)
+    if not patches:
+        return jsonify({"error": "Mapping khong hop le hoac layer khong con ton tai."}), 400
+
+    out = JOBS_DIR / job_id / "out"
+    with _EDIT_LOCK:
+        edits = _load_edits(out)
+        for layer_id, patch in patches.items():
+            current = edits.get(layer_id) or {}
+            current["link"] = patch["link"]
+            edits[layer_id] = current
+        _save_edits(out, edits)
+
+        mobile_dir = out / "_mobile"
+        if (mobile_dir / "layout.json").exists():
+            mobile_layout = _effective_layout(mobile_dir)
+            by_name = {}
+            for layer in mobile_layout.get("layers") or []:
+                by_name.setdefault(normalize_name(layer.get("name")), layer)
+            mobile_edits = _load_edits(mobile_dir)
+            for item in applied:
+                match = by_name.get(normalize_name(item.get("layer_name")))
+                if match:
+                    current = mobile_edits.get(match["id"]) or {}
+                    current["link"] = _flow_link(item)
+                    mobile_edits[match["id"]] = current
+            _save_edits(mobile_dir, mobile_edits)
+
+    spec = _load_flow_spec(job_id) or {"version": 1, "source": "manual", "items": []}
+    incoming = {item.get("id"): item for item in data.get("items") or []}
+    spec["items"] = [incoming.get(item.get("id"), item) for item in spec.get("items") or []]
+    spec["summary"] = {
+        "requirements": len(spec["items"]),
+        "proposed": sum(item.get("status") == "proposed" for item in spec["items"]),
+        "needs_review": sum(item.get("status") == "review" for item in spec["items"]),
+        "applied": sum(item.get("status") == "applied" for item in spec["items"]),
+    }
+    _save_flow_spec(job_id, spec)
+    manifest = _build_manifest(job_id)
+    job["manifest"] = manifest
+    return jsonify({"ok": True, "applied": len(patches), "flow": spec,
+                    "manifest": manifest})
+
+
 @app.route("/preview", methods=["POST"])
 def preview():
     """Xem thu: render slices theo lua chon anh hien tai (khong ZIP)."""
@@ -1109,8 +1571,9 @@ def preview():
     swiper = _flag(data.get("swiper"))
     disabled_d = data.get("disabled_desktop") or []
     disabled_m = data.get("disabled_mobile") or []
-    threading.Thread(target=_run_preview,
-                     args=(job_id, swiper, disabled_d, disabled_m), daemon=True).start()
+    if not _start_job_task(
+            job_id, _run_preview, (job_id, swiper, disabled_d, disabled_m)):
+        return _busy_response()
     return jsonify({"job_id": job_id})
 
 
@@ -1120,6 +1583,42 @@ def status(job_id):
     if not job:
         return jsonify({"error": "khong tim thay job"}), 404
     return jsonify(job)
+
+
+@app.route("/jobs")
+def list_jobs():
+    """Danh sach job gan day cho man hinh quan ly demo."""
+    items = []
+    for jdir in JOBS_DIR.iterdir():
+        if not jdir.is_dir() or not _safe_job_dir(jdir.name):
+            continue
+        try:
+            items.append(_job_summary(jdir))
+        except OSError:
+            continue
+    items.sort(key=lambda item: item["updated_at"], reverse=True)
+    return jsonify({"jobs": items[:30], "ttl_days": _JOB_TTL_DAYS})
+
+
+@app.route("/jobs/<job_id>", methods=["DELETE"])
+def delete_job(job_id):
+    ok, error = _delete_job(job_id)
+    if not ok:
+        code = 409 if "dang chay" in (error or "") else 404
+        return jsonify({"error": error}), code
+    return jsonify({"ok": True, "job_id": job_id})
+
+
+@app.route("/jobs/cleanup", methods=["POST"])
+def cleanup_jobs():
+    data = request.get_json(silent=True) or {}
+    try:
+        days = int(data.get("days", _JOB_TTL_DAYS or 7))
+    except (TypeError, ValueError):
+        return jsonify({"error": "So ngay khong hop le."}), 400
+    days = max(1, min(365, days))
+    removed = _cleanup_old_jobs(days)
+    return jsonify({"ok": True, "removed": removed, "days": days})
 
 
 @app.route("/result/<job_id>/<path:filename>")
@@ -1148,11 +1647,22 @@ def main():
     # Host/port cau hinh qua bien moi truong:
     #   PSD2HTML_HOST=0.0.0.0  -> may khac cung mang LAN truy cap duoc (qua IP may nay)
     #   PSD2HTML_PORT=5000
+    #   PSD2HTML_ACCESS_TOKEN=... -> token co dinh de chia se cho nhom test
+    global _ACCESS_TOKEN
     host = _os.environ.get("PSD2HTML_HOST", "127.0.0.1")
     port = int(_os.environ.get("PSD2HTML_PORT", "5000"))
     print(f"psd2html web UI: dang chay tren {host}:{port}")
-    if host == "0.0.0.0":
-        print("  -> May khac cung mang mo: http://<IP-may-nay>:%d" % port)
+    is_lan = _is_lan_host(host)
+    if is_lan:
+        if not _ACCESS_TOKEN:
+            _ACCESS_TOKEN = secrets.token_urlsafe(24)
+            print("  -> Da tu sinh access token cho phien nay.")
+        print("  -> May khac cung mang mo:")
+        print(f"     http://<IP-may-nay>:{port}/?token={_ACCESS_TOKEN}")
+        print("  -> Dat PSD2HTML_ACCESS_TOKEN de token khong doi sau restart.")
+    removed = _cleanup_old_jobs()
+    if removed:
+        print(f"  -> Da don {len(removed)} job cu hon {_JOB_TTL_DAYS} ngay.")
     app.run(host=host, port=port, debug=False, threaded=True)
 
 

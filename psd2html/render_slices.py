@@ -100,8 +100,12 @@ def render(out_dir, swiper=False):
     # Phat hien thanh CO DINH (nav/logo lap o moi section) -> render 1 lan, bo ban trung.
     from .fixed_overlay import detect_fixed_overlay
     fixed_items, drop_ids = detect_fixed_overlay(out_dir, layout)
+    # Import cuc bo de tranh vong import luc nap module.
+    from .export_web import _inline_popups
+    inline_popups, inline_ids = _inline_popups(layout, "assets", "desktop")
 
-    layers = [l for l in layout["layers"] if l.get("asset") and l["id"] not in drop_ids]
+    layers = [l for l in layout["layers"]
+              if l.get("asset") and l["id"] not in drop_ids | inline_ids]
 
     # Chieu cao thuc: cat theo ANH COMPOSITE that - chi bo cac dong TRONG (dong mau)
     # o day, giu lai moi dong con hinh (ke ca nen trang tri footer nhu seu/song vang).
@@ -116,6 +120,7 @@ def render(out_dir, swiper=False):
         f".stage {{ position: relative; width: {cw}px; height: {stage_h}px;"
         f" margin: 0 auto; transform-origin: top left; overflow: hidden; }}",
         ".stage .node { position: absolute; display: block; }",
+        ".stage .node.psd-hidden { display: none; }",
         ".stage a.node > img { width: 100%; height: 100%; display: block; }",
         # CHU THAT: the text (a/div) - bo gach chan, giu mau tu inline style
         ".stage .txt { text-decoration: none; overflow: hidden; padding: 2px 4px; }",
@@ -135,6 +140,7 @@ def render(out_dir, swiper=False):
         ALT (l['alt']) - deu tu editor (edits.json)."""
         b = l["bbox"]
         cls = l["id"]
+        html_cls = cls + (" psd-hidden" if l.get("visible", True) is False else "")
         txt = l.get("text") or {}
         link = l.get("link") or {}
         # alt: uu tien alt nguoi dung dat -> noi dung chu -> ten layer.
@@ -162,23 +168,24 @@ def render(out_dir, swiper=False):
         else:
             load = ' loading="lazy"' if lazy else ' loading="eager"'
         # nut/link: nguoi dung danh dau (button), co url/action, hoac keyword
-        is_btn = bool(link.get("button") or link.get("url") or link.get("action")) or _is_interactive(l)
-        act = link.get("action") or _action_of(l)
-        href = link.get("url") or "#"
-        tgt = ' target="_blank" rel="noopener"' if link.get("url") else ""
+        popup = link.get("popup")
+        is_btn = bool(link.get("button") or link.get("url") or link.get("action") or popup) or _is_interactive(l)
+        act = ("popup:" + str(popup)) if popup else (link.get("action") or _action_of(l))
+        href = "#" if popup else (link.get("url") or "#")
+        tgt = ' target="_blank" rel="noopener"' if link.get("url") and not popup else ""
 
         if as_text:
             content = html_mod.escape(txt.get("content") or "", quote=False)
             if is_btn:
-                h = (f'<a class="node hot txt {cls}" href="{href}" data-action="{act}"{tgt} '
+                h = (f'<a class="node hot txt {html_cls}" href="{href}" data-action="{act}"{tgt} '
                      f'title="{alt}">{content}</a>')
             else:
-                h = f'<div class="node txt {cls}">{content}</div>'
+                h = f'<div class="node txt {html_cls}">{content}</div>'
         elif is_btn:
-            h = (f'<a class="node hot {cls}" href="{href}" data-action="{act}"{tgt} title="{alt}">'
+            h = (f'<a class="node hot {html_cls}" href="{href}" data-action="{act}"{tgt} title="{alt}">'
                  f'<img src="{l["asset"]}" alt="{alt}"{wh}{load} decoding="async"></a>')
         else:
-            h = f'<img class="node {cls}" src="{l["asset"]}" alt="{alt}"{wh}{load} decoding="async">'
+            h = f'<img class="node {html_cls}" src="{l["asset"]}" alt="{alt}"{wh}{load} decoding="async">'
         return h, rule
 
     sections = layout.get("sections")
@@ -188,7 +195,9 @@ def render(out_dir, swiper=False):
     def _area(l):
         b = l["bbox"]; return b["width"] * b["height"]
     _top_y1 = sections[0]["y1"] if sections else ch
-    _cands = [l for l in layers if l.get("asset") and not (l.get("text") or {}).get("asText")]
+    _cands = [l for l in layers if l.get("asset")
+              and l.get("visible", True) is not False
+              and not (l.get("text") or {}).get("asText")]
     _top = [l for l in _cands if l["bbox"]["y"] < _top_y1]
     _pool = _top or _cands
     lcp_id = max(_pool, key=_area)["id"] if _pool else None
@@ -243,6 +252,12 @@ def render(out_dir, swiper=False):
         "border-radius:9px;padding:11px 26px;font-weight:700;cursor:pointer;font-size:15px;}",
         ".modal .mx{position:absolute;top:8px;right:14px;background:none;border:0;color:#7d90b5;"
         "font-size:24px;cursor:pointer;line-height:1;}",
+        ".psd-popup-frame{position:relative;max-width:94vw;max-height:90vh;}",
+        ".psd-popup-canvas{position:absolute;left:0;top:0;transform-origin:top left;}",
+        ".psd-popup-canvas .pnode{position:absolute;display:block;}",
+        ".psd-popup-canvas .pnode.psd-hidden{display:none;}",
+        ".psd-popup-frame>.mx{position:absolute;right:-14px;top:-14px;z-index:5;width:36px;height:36px;"
+        "border:0;border-radius:50%;background:#111a2e;color:#e8eeff;font-size:25px;cursor:pointer;}",
     ]
     if swiper:
         # Che do SWIPER full-page kieu FADE (giong swiper effect:'fade'): cac section
@@ -304,6 +319,28 @@ def render(out_dir, swiper=False):
         fixed_block = ("\n    var fstage=document.querySelector('.fixed-stage');"
                        "\n    if(fstage) fstage.style.transform='scale('+s+')';")
 
+    popup_html = []
+    for popup in inline_popups:
+        nodes = []
+        for item in popup["flat"]:
+            alt = html_mod.escape(item.get("alt") or "", quote=True)
+            hidden = " psd-hidden" if item.get("hidden") else ""
+            style = (f"left:{item['x']}px;top:{item['y']}px;"
+                     f"width:{item['w']}px;height:{item['h']}px;"
+                     f"opacity:{item.get('o', 1)}")
+            nodes.append(
+                f'<img class="pnode{hidden}" src="{item["src"].lstrip("/")}" '
+                f'alt="{alt}" width="{item["w"]}" height="{item["h"]}" '
+                f'loading="lazy" decoding="async" style="{style}">'
+            )
+        popup_html.append(
+            f'<div class="modal-bg psd-modal" data-popup-id="{popup["id"]}">'
+            f'<div class="psd-popup-frame" data-w="{popup["w"]}" data-h="{popup["h"]}">'
+            '<button class="mx" data-close-popup>&times;</button>'
+            f'<div class="psd-popup-canvas" style="width:{popup["w"]}px;height:{popup["h"]}px">'
+            + "".join(nodes) + "</div></div></div>"
+        )
+
     modal_html = ('<div class="modal-bg" id="modal">'
                   '<div class="modal"><button class="mx" data-close>&times;</button>'
                   '<h3 id="m-title">Thông báo</h3><p id="m-desc"></p>'
@@ -321,15 +358,39 @@ def render(out_dir, swiper=False):
   var LINKS = Object.assign({ download:"", login:"", register:"", topup:"", gift:"", rules:"", history:"", social:"", check:"" }, __LINKS__);
   var LABELS = { download:"Tải game", login:"Đăng nhập", register:"Đăng ký", topup:"Nạp", gift:"Nhận quà", rules:"Thể lệ", history:"Lịch sử", social:"Facebook", check:"Kiểm tra" };
   var modal=document.getElementById('modal'), mTitle=document.getElementById('m-title'), mDesc=document.getElementById('m-desc');
+  var psdModals=[].slice.call(document.querySelectorAll('.psd-modal'));
   function openModal(t,d){ mTitle.textContent=t; mDesc.textContent=d; modal.classList.add('show'); }
   function closeModal(){ modal.classList.remove('show'); }
+  function closePsdPopups(){ psdModals.forEach(function(m){m.classList.remove('show');}); }
+  function fitPsdPopup(m){
+    var f=m.querySelector('.psd-popup-frame'), c=m.querySelector('.psd-popup-canvas');
+    var w=+f.getAttribute('data-w'), h=+f.getAttribute('data-h');
+    var s=Math.min(1,document.documentElement.clientWidth*.94/w,document.documentElement.clientHeight*.9/h);
+    f.style.width=(w*s)+'px'; f.style.height=(h*s)+'px'; c.style.transform='scale('+s+')';
+  }
+  function openPsdPopup(id){
+    closePsdPopups();
+    var m=document.querySelector('.psd-modal[data-popup-id="'+id+'"]');
+    if(m){ fitPsdPopup(m); m.classList.add('show'); }
+  }
   modal.addEventListener('click',function(e){ if(e.target===modal||e.target.hasAttribute('data-close')) closeModal(); });
-  document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeModal(); });
+  psdModals.forEach(function(m){m.addEventListener('click',function(e){
+    if(e.target===m||e.target.hasAttribute('data-close-popup')) closePsdPopups();
+  });});
+  window.addEventListener('resize',function(){psdModals.forEach(function(m){if(m.classList.contains('show'))fitPsdPopup(m);});});
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'){closeModal();closePsdPopups();} });
   document.querySelectorAll('.hot').forEach(function(a){ a.addEventListener('click',function(e){
     var href=a.getAttribute('href');
     if(href && href!=='#'){ return; }                 // co link that -> dieu huong tu nhien
     e.preventDefault();
     var act=a.getAttribute('data-action')||'other', url=LINKS[act];
+    if(act.indexOf('popup:')===0){ openPsdPopup(act.slice(6)); return; }
+    if(act.indexOf('scroll:')===0){
+      var si=parseInt(act.slice(7),10), target=secs[si];
+      if(typeof go==='function'){ go(si); }
+      else if(target){ window.scrollTo({top:Math.max(0,target.getBoundingClientRect().top+window.scrollY-4),behavior:'smooth'}); }
+      return;
+    }
     if(url){ window.open(url,'_blank'); return; }
     openModal(LABELS[act]||'Thông báo','Chức năng "'+(LABELS[act]||act)+'": điền URL vào LINKS.'+act+' hoặc gọi API tại đây.'); }); });
 '''.replace("__LINKS__", json.dumps(link_cfg, ensure_ascii=False))
@@ -439,7 +500,7 @@ __COMMON__
   <h1 class="sr-only">{esc(page_title)}</h1>
   {body_wrap}
 </main>
-{modal_html}{js}
+{modal_html}{''.join(popup_html)}{js}
 </body>
 </html>
 """

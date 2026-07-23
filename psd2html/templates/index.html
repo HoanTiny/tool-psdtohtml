@@ -53,6 +53,19 @@
       <button id="goParse">&#128269; Phân tích PSD</button>
       <small style="color:var(--muted)">PSD lớn có thể mất 1–3 phút để đọc.</small>
     </div>
+    <section class="recentJobsPanel" aria-labelledby="recentJobsTitle">
+      <div class="recentJobsHead">
+        <div>
+          <b id="recentJobsTitle">Dự án gần đây</b>
+          <small id="recentJobsMeta">Đang tải danh sách…</small>
+        </div>
+        <button class="ghost sm" id="refreshJobs" type="button">↻ Làm mới</button>
+        <button class="ghost sm dangerBtn" id="cleanupJobs" type="button">Dọn job cũ</button>
+      </div>
+      <div class="recentJobsList" id="recentJobsList">
+        <div class="recentJobsEmpty">Đang tải…</div>
+      </div>
+    </section>
   </div>
 
   <!-- tiến trình phân tích -->
@@ -73,6 +86,7 @@
         <button class="ghost sm" id="redoBtn" type="button" title="Làm lại (Ctrl+Shift+Z hoặc Ctrl+Y)" disabled>↷</button>
       </span>      <button class="ghost sm dockToggle" id="toggleLayers" title="Ẩn/hiện Layers">☰ Layers</button>
       <button class="ghost sm dockToggle" id="toggleInspector" title="Ẩn/hiện Inspector">⚙ Inspector</button>
+      <button class="ghost sm" id="baFlowBtn" title="Upload tài liệu BA và ghép luồng">📋 Luồng BA</button>
       <span class="spacer"></span>
       <span class="chip" id="selInfo"></span>
       <button class="ghost sm" id="goReview" title="Xem trước bản HTML thật theo ảnh đang chọn">&#128065; Xem thử</button>
@@ -89,6 +103,27 @@
         <div><b>Thuộc tính</b><small>Layer đang chọn</small></div>
         <span class="dockBadge">INSPECTOR</span>
       </div>
+    <details class="acc baFlowConfig" id="baFlowAcc">
+      <summary>
+        <span class="exportSummaryIcon">📋</span>
+        <span class="summaryCopy"><b>Luồng BA</b><small>Ghép yêu cầu với layer và hành động</small></span>
+        <span class="arw">⌄</span>
+      </summary>
+      <div class="body">
+        <label class="baUploadDrop" for="baDocument">
+          <b>Upload tài liệu BA</b>
+          <small>TXT, MD, DOCX, XLSX hoặc PDF · tối đa 25 MB</small>
+          <span id="baFileName">Chọn tài liệu</span>
+        </label>
+        <input type="file" id="baDocument" accept=".txt,.md,.docx,.xlsx,.pdf" hidden>
+        <div class="baToolbar">
+          <button class="sm" id="baAnalyze" type="button">Phân tích &amp; đề xuất</button>
+          <button class="sm ghost" id="baApply" type="button" disabled>Áp dụng mapping</button>
+        </div>
+        <p class="baStatus" id="baStatus">Chưa có tài liệu BA.</p>
+        <div class="baFlowList" id="baFlowList"></div>
+      </div>
+    </details>
     <details class="acc exportConfig" id="exportAcc">
       <summary>
         <span class="exportSummaryIcon">↗</span>
@@ -221,8 +256,9 @@
         <div class="canvasToolbar">
           <span class="toolActive">↖ Chọn</span>
           <span>Giữ Space để di chuyển canvas</span>
-          <button class="ghost sm" id="fitCanvas" type="button">Vừa màn hình</button>
+          <button class="ghost sm" id="fitCanvas" type="button" title="Co canvas vừa chiều rộng vùng làm việc">Fit width</button>
         </div>
+        <div class="assetStats" id="assetStats" title="Thong ke asset sau khi khu trung lap"></div>
         <div class="secNav" id="secNav"></div>
         <div class="pvtop">
           <span>Nhấp để chọn &middot; kéo để chỉnh</span>
@@ -232,7 +268,7 @@
       </div>
       <aside class="layerDock" aria-label="Danh sách layer">
         <div class="dockHead">
-          <div><b>Layers</b><small>Cấu trúc PSD</small></div>
+          <div><b>Layers</b><small>Kéo layer để đổi thứ tự trong cùng thư mục</small></div>
           <span class="dockBadge" id="layerCountBadge">0</span>
         </div>
         <div class="listhead">
@@ -246,8 +282,9 @@
       <button class="ghost" id="restart">&#8617; Phân tích file khác</button>
       <span class="statusItem" id="canvasMeta">Chưa có canvas</span>
       <span class="statusItem saveReady" id="saveStatus">● Sẵn sàng</span>
+      <span class="statusItem jobReady" id="jobTaskStatus">● Job sẵn sàng</span>
       <span style="flex:1"></span>
-      <span class="shortcutHint">F Fit · G Group · L Layers · I Inspector · Space Pan</span>
+      <span class="shortcutHint">F Fit width · PgUp/PgDn Section · G Group · Space Pan</span>
     </div>
 
     <div id="reviewBox" style="display:none;margin-top:6px">
@@ -276,6 +313,7 @@
     <div id="result" style="display:none"></div>
   </div>
 </div>
+<div class="toastStack" id="toastStack" aria-live="polite"></div>
 <script src="../static/js/app.js" defer></script>
 <script src="../static/js/editor-shell.js" defer></script>
 </body></html>

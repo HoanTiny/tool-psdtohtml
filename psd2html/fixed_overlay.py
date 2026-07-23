@@ -71,7 +71,8 @@ def detect_fixed_overlay(out_dir, layout, pos_tol=16, size_tol=6,
     # Ung vien: layer foreground (khong phai nen) co asset.
     cands = []
     for l in layout["layers"]:
-        if l.get("kind") == "group" or not l.get("asset"):
+        if (l.get("kind") == "group" or not l.get("asset")
+                or l.get("visible", True) is False):
             continue
         if is_background(l, cw, ch):
             continue

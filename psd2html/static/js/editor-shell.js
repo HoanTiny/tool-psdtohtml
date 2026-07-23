@@ -128,7 +128,13 @@
     const key = event.key.toLowerCase();
     if (key === "f") {
       previewZoom = 1;
+      canvasScrollIntent = "preserve";
       render();
+    } else if (key === "pagedown" && typeof showCanvasSection === "function") {
+      showCanvasSection(curSec + 1);
+    } else if (key === "pageup" && typeof showCanvasSection === "function") {
+      if (curSec >= 0) showCanvasSection(curSec - 1);
+      else return;
     } else if (key === "g") {
       document.getElementById("grpMode").click();
     } else if (key === "l") {

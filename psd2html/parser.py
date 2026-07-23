@@ -29,6 +29,7 @@ Moi {layer}:
 
 import json
 import os
+import hashlib
 from pathlib import Path
 
 from PIL import Image
@@ -43,28 +44,44 @@ from .sectionize import is_background
 # webp_lossless_max: anh nho hon dien tich nay -> WEBP LOSSLESS (chu/icon/logo cang sac).
 # trim: cat le trong suot theo kenh alpha -> bbox khop dung pixel that (chinh xac hon).
 # trim_thr: alpha <= nguong nay coi nhu trong suot (bo bong/glow rat mo o mep gay lech).
-_ASSET_CFG = {"fmt": "webp", "quality": 92, "lossless_max": 300000, "trim": True, "trim_thr": 8}
+_ASSET_DEFAULTS = {
+    "fmt": "webp", "quality": 92, "lossless_max": 300000,
+    "trim": True, "trim_thr": 8,
+}
 
 
-def _apply_asset_cfg(asset_fmt=None, webp_quality=None, webp_lossless_max=None):
-    """Cap nhat cau hinh asset: uu tien tham so truyen -> .env -> mac dinh."""
-    fmt = (asset_fmt or os.environ.get("PSD2HTML_ASSET_FMT", "webp")).lower()
-    q = int(webp_quality if webp_quality is not None else os.environ.get("PSD2HTML_WEBP_QUALITY", "92"))
+def _asset_cfg(asset_fmt=None, webp_quality=None, webp_lossless_max=None):
+    """Tao cau hinh asset RIENG cho mot lan parse.
+
+    Khong luu vao bien global: webapp co the parse nhieu job song song voi preset
+    khac nhau, neu dung mutable global thi job sau se doi quality/format cua job
+    dang chay.
+    """
+    fmt = (asset_fmt or os.environ.get(
+        "PSD2HTML_ASSET_FMT", _ASSET_DEFAULTS["fmt"])).lower()
+    q = int(webp_quality if webp_quality is not None else os.environ.get(
+        "PSD2HTML_WEBP_QUALITY", str(_ASSET_DEFAULTS["quality"])))
     lm = int(webp_lossless_max if webp_lossless_max is not None
-             else os.environ.get("PSD2HTML_WEBP_LOSSLESS_MAX", "300000"))
+             else os.environ.get("PSD2HTML_WEBP_LOSSLESS_MAX",
+                                 str(_ASSET_DEFAULTS["lossless_max"])))
     trim = os.environ.get("PSD2HTML_TRIM", "1") not in ("0", "false", "no")
     thr = int(os.environ.get("PSD2HTML_TRIM_THR", "8"))
-    _ASSET_CFG.update(fmt="png" if fmt == "png" else "webp", quality=q, lossless_max=lm,
-                      trim=trim, trim_thr=thr)
+    return {
+        "fmt": "png" if fmt == "png" else "webp",
+        "quality": q,
+        "lossless_max": lm,
+        "trim": trim,
+        "trim_thr": thr,
+    }
 
 
-def _trim_alpha(img):
+def _trim_alpha(img, asset_cfg):
     """Cat le trong suot theo alpha (bo pixel alpha <= trim_thr o vien). Tra ve
     (anh_da_cat, dx, dy) - dx/dy la lech goc trai-tren de bu vao bbox. Neu anh rong
     hoan toan -> (None, 0, 0). Khong doi -> (img, 0, 0)."""
     try:
         alpha = img.getchannel("A")
-        thr = _ASSET_CFG.get("trim_thr", 0)
+        thr = asset_cfg.get("trim_thr", 0)
         if thr > 0:
             alpha = alpha.point(lambda a: 255 if a > thr else 0)
         box = alpha.getbbox()
@@ -77,19 +94,28 @@ def _trim_alpha(img):
         return img, 0, 0
 
 
-def _save_asset(img, assets_dir, lid):
-    """Luu asset theo cau hinh _ASSET_CFG. Tra ve ten file (vd L3.webp)."""
-    if _ASSET_CFG["fmt"] == "png":
+def _save_asset(img, assets_dir, lid, asset_cfg):
+    """Luu asset theo cau hinh cua job. Tra ve ten file (vd L3.webp)."""
+    if asset_cfg["fmt"] == "png":
         name = f"{lid}.png"
         img.save(assets_dir / name)
     else:
         name = f"{lid}.webp"
         w, h = img.size
-        if _ASSET_CFG["lossless_max"] and w * h <= _ASSET_CFG["lossless_max"]:
+        if asset_cfg["lossless_max"] and w * h <= asset_cfg["lossless_max"]:
             img.save(assets_dir / name, "WEBP", lossless=True, method=6)   # chu/icon/logo: sac net
         else:
-            img.save(assets_dir / name, "WEBP", quality=_ASSET_CFG["quality"], method=4)  # nen/nhan vat: nhe
+            img.save(assets_dir / name, "WEBP", quality=asset_cfg["quality"], method=4)  # nen/nhan vat: nhe
     return name
+
+
+def _asset_digest(img):
+    """Hash noi dung pixel sau khi clip/trim de layer trung dung chung asset."""
+    rgba = img.convert("RGBA")
+    digest = hashlib.sha256()
+    digest.update(f"{rgba.width}x{rgba.height}:RGBA:".encode("ascii"))
+    digest.update(rgba.tobytes())
+    return digest.hexdigest()
 
 
 def _load_env():
@@ -328,19 +354,25 @@ def _mostly_dark(img, thr=0.92):
         return False
 
 
-def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch=0, parent_id=None, overlay=None):
+def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch=0,
+          parent_id=None, parent_visible=True, overlay=None, asset_cfg=None,
+          asset_cache=None):
     """
     Duyet de quy cay layer, lam phang thanh danh sach `out`.
     - Group thi ghi lai roi duyet vao con.
     - Layer chu thi lay text style.
     - Layer anh/shape thi xuat PNG.
     - Moi node co `parent` = id group cha (de dung lai cay group ben codegen).
-    Layer khong hien (visible=False) hoac rong thi bo qua.
+    Layer an van duoc xuat asset va ghi `visible=False` de code sinh ra co the
+    dung cho popup/tab/trang thai. Chi layer la rong hoan toan moi bi bo qua.
     """
+    if asset_cache is None:
+        asset_cache = {}
     for sub in layer:
-        if not sub.visible:
-            continue
-        if sub.bbox == (0, 0, 0, 0):  # layer rong
+        own_visible = bool(sub.visible)
+        effective_visible = bool(parent_visible and own_visible)
+        is_group = sub.is_group()
+        if not is_group and sub.bbox == (0, 0, 0, 0):  # layer rong
             continue
 
         counter[0] += 1
@@ -352,24 +384,70 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
             "bbox": _bbox_to_dict(sub),
             "opacity": round(sub.opacity / 255, 2),
             "parent": parent_id,
+            # visible la trang thai HIEU LUC, da tinh ca folder cha bi an.
+            "visible": effective_visible,
+            # visible_self giu trang thai rieng cua node, dung de tach popup nam
+            # trong folder an va tinh lai hien/an tuong doi ben trong popup.
+            "visible_self": own_visible,
         }
         blend = _blend_css(sub)
         if blend:
             node["blend"] = blend
 
-        if sub.is_group():
+        if is_group:
             out.append(node)
-            _walk(sub, out, assets_dir, counter, canvas, real_comp, cw, ch, parent_id=lid, overlay=overlay)
+            _walk(sub, out, assets_dir, counter, canvas, real_comp, cw, ch,
+                  parent_id=lid, parent_visible=effective_visible,
+                  overlay=overlay, asset_cfg=asset_cfg, asset_cache=asset_cache)
             continue
 
         # Composite rieng layer nay 1 lan (dung lay ALPHA/hinh dang + du phong)
         img = None
+        changed_visibility = []
         try:
-            img = sub.composite()
+            # psd-tools nhan trang thai an tu group cha vao alpha cua composite.
+            # Bat TAM layer + cac group cha, render xong phuc hoi ngay de lay duoc
+            # ca layer an ma khong lam thay doi screenshot/trang thai PSD.
+            if not effective_visible:
+                current = sub
+                while current is not None:
+                    try:
+                        if not current.visible:
+                            current.visible = True
+                            changed_visibility.append(current)
+                    except Exception:
+                        pass
+                    current = getattr(current, "parent", None)
+            # force=True la can thiet de psd-tools render noi dung layer dang an.
+            img = sub.composite(force=not effective_visible)
             if img is not None:
                 img = img.convert("RGBA")
+        except TypeError:
+            # Tuong thich psd-tools cu chua co tham so force.
+            try:
+                img = sub.composite()
+                if img is not None:
+                    img = img.convert("RGBA")
+            except Exception:
+                img = None
         except Exception:
             img = None
+        finally:
+            for changed in reversed(changed_visibility):
+                try:
+                    changed.visible = False
+                except Exception:
+                    pass
+
+        # Mot so kind/PSD cu van tra composite alpha rong; topil la du phong cuoi
+        # de asset an khong bi mat (co the it layer-style hon nhung dung noi dung).
+        if not effective_visible and (img is None or img.getchannel("A").getbbox() is None):
+            try:
+                raw = sub.topil()
+                if raw is not None:
+                    img = raw.convert("RGBA")
+            except Exception:
+                pass
 
         # Layer chu: van luu noi dung text (de lam alt / tra cuu),
         # nhung VAN xuat ra PNG - vi chu cach dieu trong landing thuong la anh.
@@ -386,7 +464,7 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
         # lay mau tu composite tong (giu ALPHA cua layer). Menu overlay giu composite rieng.
         b = node["bbox"]
         is_overlay = overlay is not None and id(sub) in overlay
-        if (real_comp is not None and img is not None
+        if (effective_visible and real_comp is not None and img is not None
                 and not is_background(node, cw, ch) and not is_overlay
                 and _is_flat(img)):
             try:
@@ -406,7 +484,7 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
         # -> neu de nguyen se CHE ca trang (bug hero den). Chi khi DO: thay bang crop composite
         # tong. Layer PIXEL/type/shape THUONG (lop phu den 65%, khoi, gradient) KHONG bao gio
         # vao day -> luon giu composite rieng (dung noi dung + do mo + blend qua CSS).
-        elif (real_comp is not None and img is not None
+        elif (effective_visible and real_comp is not None and img is not None
               and _is_adjustment_kind(sub.kind) and not is_overlay
               and _is_uniform(img)):
             try:
@@ -445,7 +523,7 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
         # coi la 'background' MA noi dung that lai NHO trong bbox lon (vd nut/anh co bbox
         # full-canvas do PSD) -> VAN trim, neu khong asset nho se bi keo gian full man khi
         # export (img width = bbox.width). Quyet dinh bang do phu alpha trong bbox.
-        do_trim = export_img is not None and _ASSET_CFG.get("trim", True)
+        do_trim = export_img is not None and asset_cfg.get("trim", True)
         if do_trim and is_background(node, cw, ch):
             cb = export_img.getbbox()   # vung pixel co alpha > 0
             if cb:
@@ -453,7 +531,7 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
                 if cov >= 0.6:          # noi dung phu phan lon -> nen thuc su -> giu nguyen
                     do_trim = False
         if do_trim:
-            timg, dx, dy = _trim_alpha(export_img)
+            timg, dx, dy = _trim_alpha(export_img, asset_cfg)
             if timg is None:
                 export_img = None            # layer trong suot hoan toan -> bo
             elif dx or dy or timg.size != export_img.size:
@@ -465,7 +543,11 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
         # Xuat asset cho MOI layer ve duoc (ke ca layer chu) - mac dinh WebP.
         if export_img is not None:
             try:
-                name = _save_asset(export_img, assets_dir, lid)
+                digest = _asset_digest(export_img)
+                name = asset_cache.get(digest)
+                if not name or not (assets_dir / name).exists():
+                    name = _save_asset(export_img, assets_dir, lid, asset_cfg)
+                    asset_cache[digest] = name
                 node["asset"] = f"assets/{name}"
                 # composite() DA nuong opacity cua layer vao ALPHA -> KHONG ap lai qua CSS
                 # (neu khong se mo GAP DOI, vd lop phu den 65%). Alpha da mang do mo that.
@@ -474,7 +556,7 @@ def _walk(layer, out, assets_dir, counter, canvas=None, real_comp=None, cw=0, ch
                 pass
 
         # Ghep vao canvas du phong (dung toa do GOC; PIL tu cat o canh canvas)
-        if canvas is not None and img is not None:
+        if effective_visible and canvas is not None and img is not None:
             try:
                 canvas.paste(img.convert("RGBA"), (orig_b["x"], orig_b["y"]), img.convert("RGBA"))
             except Exception:
@@ -492,7 +574,7 @@ def parse_psd(psd_path, out_dir, asset_fmt=None, webp_quality=None, webp_lossles
     Tra ve: duong dan file layout.json
     """
     _load_env()
-    _apply_asset_cfg(asset_fmt, webp_quality, webp_lossless_max)
+    asset_cfg = _asset_cfg(asset_fmt, webp_quality, webp_lossless_max)
     psd_path = Path(psd_path)
     out_dir = Path(out_dir)
     assets_dir = out_dir / "assets"
@@ -522,8 +604,10 @@ def parse_psd(psd_path, out_dir, asset_fmt=None, webp_quality=None, webp_lossles
     fallback = Image.new("RGBA", (psd.width, psd.height), (255, 255, 255, 255))
     layers = []
     counter = [0]
+    asset_cache = {}
     _walk(psd, layers, assets_dir, counter, canvas=fallback,
-          real_comp=real_comp, cw=psd.width, ch=psd.height, overlay=overlay)
+          real_comp=real_comp, cw=psd.width, ch=psd.height, overlay=overlay,
+          asset_cfg=asset_cfg, asset_cache=asset_cache)
 
     # Screenshot tong: uu tien composite that; neu rong thi dung ban tu ghep
     screenshot_path = out_dir / "screenshot.png"
@@ -546,7 +630,7 @@ def parse_psd(psd_path, out_dir, asset_fmt=None, webp_quality=None, webp_lossles
     with open(layout_path, "w", encoding="utf-8") as f:
         json.dump(layout, f, ensure_ascii=False, indent=2)
 
-    print(f"[4/4] Xong Pha 1: {len(layers)} layer -> {layout_path}")
+    print(f"[4/4] Xong Pha 1: {len(layers)} layer, {len(asset_cache)} asset duy nhat -> {layout_path}")
     return layout_path
 
 

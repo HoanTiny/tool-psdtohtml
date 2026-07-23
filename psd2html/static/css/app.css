@@ -59,6 +59,12 @@
   @media(max-width:860px){.ed{grid-template-columns:1fr}}
   .prevBox{position:sticky;top:66px;align-self:start;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:12px;max-height:90vh;overflow:auto}
   .prevBox .cap{font-size:11px;color:var(--muted);text-align:center;margin-bottom:8px}
+  .assetStats{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0;padding:7px 9px;border:1px solid #263a5c;border-radius:8px;background:#0b1528;color:#8fa4c8;font-size:10px}
+  .assetStats span{display:inline-flex;align-items:center;gap:3px;padding-right:7px;border-right:1px solid #263a5c}
+  .assetStats span:last-child{padding-right:0;border-right:0}
+  .assetStats b{color:#dbeafe;font-size:11px}
+  .assetStats.hasDup{border-color:#1f6b4a;background:#0b1e19}
+  .assetStats.hasDup .saved,.assetStats.hasDup .saved b{color:#6ee7b7}
   .pvtop{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin-bottom:8px}
   .zoom{display:inline-flex;align-items:center;gap:2px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:2px}
   .zoom button{background:transparent;box-shadow:none;border:0;color:var(--txt);font-size:15px;font-weight:700;padding:2px 9px;border-radius:6px;line-height:1}
@@ -108,7 +114,7 @@
   @media(max-width:560px){.layers{grid-template-columns:1fr}}
   .item{display:flex;align-items:center;gap:8px;padding:6px;border:1px solid var(--line);border-radius:9px;background:var(--bg2);cursor:pointer;transition:.1s}
   .item:hover{border-color:var(--brand2)}
-  .item.off{opacity:.42}
+  .item.off>:not(.xout){opacity:.42}
   .item .th{width:46px;height:46px;object-fit:contain;background:#0e1830;border-radius:6px;flex:0 0 46px}
   .item .nm{font-size:12px;line-height:1.28;word-break:break-word;flex:1;min-width:0}
   .item .badge{font-size:9px;padding:1px 5px;border-radius:4px;background:#33507e;color:#dbeafe;margin-left:4px}
@@ -117,6 +123,14 @@
   .item.grp{background:#0e2119;border-color:#1f7a4d}
   .item .gbadge{font-size:9px;padding:1px 5px;border-radius:4px;background:var(--grp);color:#d1fae5;margin-left:4px}
   .item .untie{margin-left:auto;font-size:11px;color:#fca5a5;background:#2a1418;border:1px solid #7f1d1d;border-radius:6px;padding:2px 7px;cursor:pointer;flex:0 0 auto}
+  .item .xout{margin-left:auto;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;border:1px solid #415475;border-radius:6px;color:#8fa4c8;background:#111c31;cursor:pointer;font-size:15px}
+  .item .untie+.xout{margin-left:4px}
+  .item .xout:hover{color:#fecaca;border-color:#b45353;background:#2a1418}
+  .item .xout.suggest{color:#fff1a8;border-color:#f59e0b;background:#55320b;box-shadow:0 0 0 1px rgba(245,158,11,.25),0 0 12px rgba(245,158,11,.48)}
+  .item .xout.suggest:hover{color:#fff;background:#7a4508;border-color:#fbbf24;box-shadow:0 0 16px rgba(251,191,36,.7)}
+  .item .xout.active{color:#fca5a5;border-color:#b91c1c;background:#32171b}
+  .item.excluded>:not(.xout){opacity:.52}
+  .item.excluded .nm{text-decoration:line-through}
   .item.sel{outline:2px solid var(--sky)}
   .gmode .item{cursor:copy}
   /* cây layer kiểu Photoshop */
@@ -127,6 +141,11 @@
   .tree .item.gsel{outline:2px solid var(--brand);background:#12233f}
   .tree .item.grp{background:#0e2119}
   .tree .item.sel{outline:2px solid var(--sky)}
+  .tree .item[draggable="true"],.tree .frow[draggable="true"]{cursor:grab}
+  .tree .item[draggable="true"]:active,.tree .frow[draggable="true"]:active{cursor:grabbing}
+  .tree .item.dragging,.tree .frow.dragging{opacity:.3}
+  .tree .item.drop-before,.tree .frow.drop-before{box-shadow:inset 0 2px 0 var(--sky)}
+  .tree .item.drop-after,.tree .frow.drop-after{box-shadow:inset 0 -2px 0 var(--sky)}
   .frow{display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:7px;cursor:pointer;user-select:none}
   .frow:hover{background:var(--card2)}
   .frow .tw{width:14px;flex:0 0 14px;text-align:center;color:var(--muted);font-size:11px}
@@ -142,6 +161,28 @@
   .sug-chip.psd{background:#0e2119;border-color:#1f7a4d;color:#a7f3d0}
   .sug-chip.psd:hover{background:#123726}
   .hint{color:var(--muted);font-size:13px;margin:0 0 12px;background:var(--bg2);border-left:3px solid var(--brand);border-radius:0 8px 8px 0;padding:9px 12px}
+  .baFlowConfig .body{display:grid;gap:9px}
+  .baUploadDrop{display:grid;gap:4px;padding:11px;border:1px dashed #365784;border-radius:9px;background:#0b162a;cursor:pointer}
+  .baUploadDrop:hover{border-color:var(--sky);background:#0f1e36}
+  .baUploadDrop b{font-size:12px}
+  .baUploadDrop small{color:var(--muted);font-size:10px;line-height:1.35}
+  .baUploadDrop span{color:#93c5fd;font-size:11px;word-break:break-word}
+  .baToolbar{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .baStatus{margin:0;color:var(--muted);font-size:10px;line-height:1.4}
+  .baStatus.ok{color:#86efac}.baStatus.err{color:#fca5a5}
+  .baFlowList{display:grid;gap:8px;max-height:390px;overflow:auto;padding-right:2px}
+  .baFlowEmpty{padding:12px;border:1px solid var(--line);border-radius:8px;color:var(--muted);font-size:11px;text-align:center}
+  .baFlowItem{display:grid;gap:7px;padding:9px;border:1px solid var(--line);border-radius:9px;background:#0b1527}
+  .baFlowItem.applied{border-color:#1f7a4d;background:#0d1d19}
+  .baFlowHead{display:flex;align-items:flex-start;gap:7px}
+  .baFlowHead input{margin-top:2px;flex:0 0 auto}
+  .baFlowHead span{font-size:10px;line-height:1.4;word-break:break-word}
+  .baConfidence{margin-left:auto;padding:2px 5px;border-radius:10px;background:#172b4d;color:#93c5fd;font-size:9px;white-space:nowrap}
+  .baFlowFields{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .baFlowFields label{display:grid;gap:3px;color:var(--muted);font-size:9px}
+  .baFlowFields label:first-child{grid-column:1 / -1}
+  .baFlowFields select,.baFlowFields input{width:100%;min-width:0;padding:6px;border:1px solid var(--line);border-radius:6px;background:#0b1425;color:var(--text);font-size:10px}
+  .baFlowWarn{color:#fbbf24;font-size:9px}
   /* inspector (layer dang chon) */
   .selPanel{background:linear-gradient(180deg,#0d2136,#0b1b2e);border:1px solid var(--sky);border-radius:12px;padding:12px 14px;margin-bottom:14px}
   .selPanel .t{font-size:14px;font-weight:700;color:#bae6fd;word-break:break-word;display:flex;align-items:center;gap:6px}
@@ -159,3 +200,43 @@
   .acc .body{padding:6px 15px 14px}
   .actionbar{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
   kbd{background:var(--bg2);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-size:11px;font-family:inherit}
+
+  /* Quan ly job gan day */
+  .recentJobsPanel{margin-top:18px;border:1px solid var(--line);border-radius:12px;background:rgba(15,26,48,.72);overflow:hidden}
+  .recentJobsHead{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line);background:rgba(20,31,56,.88)}
+  .recentJobsHead>div{display:flex;flex:1;min-width:0;flex-direction:column}
+  .recentJobsHead b{font-size:13.5px}.recentJobsHead small{color:var(--muted);font-size:11px}
+  button.dangerBtn{border-color:#713747;color:#fecdd3;background:#2a151d}
+  button.dangerBtn:hover{border-color:#ef6078;background:#431c28}
+  .recentJobsList{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:9px;max-height:420px;overflow:auto;padding:10px;scrollbar-color:#354766 #0b1220}
+  .recentJob{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:11px;border:1px solid #243555;border-radius:9px;background:#0d1729}
+  .recentJob:hover{border-color:#3d5d8f}
+  .recentJobMain{min-width:0}.recentJobTitle{display:flex;align-items:center;gap:7px;margin-bottom:4px}
+  .recentJobTitle b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}
+  .jobState{flex:0 0 auto;padding:2px 6px;border-radius:999px;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.3px;background:#17345a;color:#bfdbfe}
+  .jobState.running{background:#4a3510;color:#fde68a}.jobState.error{background:#4a1f28;color:#fecdd3}
+  .jobState.incomplete{background:#2b3446;color:#aab6ca}
+  .recentJobMeta{display:flex;gap:7px;flex-wrap:wrap;color:var(--muted);font-size:10.5px}
+  .recentJobSource{margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c6d3e8;font-size:11px}
+  .recentJobActions{display:flex;align-items:flex-start;gap:5px}
+  .recentJobActions button{padding:5px 8px;font-size:11px;border-radius:6px}
+  .recentJobsEmpty{grid-column:1/-1;padding:20px;color:var(--muted);font-size:12px;text-align:center}
+
+  /* Trang thai task dung chung */
+  #jobTaskStatus.jobBusy{color:#fbbf24}
+  #jobTaskStatus.jobError{color:#fca5a5}
+  #editor.show.jobBusy #goReview,
+  #editor.show.jobBusy #goExport,
+  #editor.show.jobBusy #grpMode,
+  #editor.show.jobBusy #undoBtn,
+  #editor.show.jobBusy #redoBtn{pointer-events:none;opacity:.48}
+  .toastStack{position:fixed;right:18px;top:18px;z-index:1000;display:flex;flex-direction:column;gap:8px;width:min(380px,calc(100vw - 36px));pointer-events:none}
+  .toastItem{padding:10px 12px;border:1px solid #35547f;border-radius:9px;background:rgba(13,25,45,.97);box-shadow:0 12px 35px rgba(0,0,0,.42);color:#dbeafe;font-size:12px;animation:toastIn .18s ease-out}
+  .toastItem.error{border-color:#8b3b4d;color:#fecdd3;background:rgba(51,20,28,.97)}
+  .toastItem.ok{border-color:#247553;color:#bbf7d0;background:rgba(10,42,31,.97)}
+  @keyframes toastIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+  @media(max-width:700px){
+    .recentJobsHead{align-items:flex-start;flex-wrap:wrap}
+    .recentJobsHead>div{flex-basis:100%}
+    .recentJobsList{grid-template-columns:1fr}
+  }

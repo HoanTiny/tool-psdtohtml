@@ -27,7 +27,57 @@ venv\Scripts\python.exe -m pip install -r requirements.txt
 ```powershell
 venv\Scripts\python.exe -m psd2html.webapp
 ```
+
+### Chia se demo trong mang LAN
+
+Mac dinh webapp chi nghe tren `127.0.0.1`. De vai nguoi trong cung mang test:
+
+```powershell
+$env:PSD2HTML_HOST = "0.0.0.0"
+$env:PSD2HTML_ACCESS_TOKEN = "doi-token-demo-rieng"
+$env:PSD2HTML_JOB_TTL_DAYS = "7"  # tu dong don job cu; dat 0 de tat
+# Tuy chon neu may co nhieu card mang/VPN:
+# $env:PSD2HTML_PUBLIC_HOST = "192.168.1.20"
+venv\Scripts\python.exe -m psd2html.webapp
+```
+
+Mo port 5000 tren Windows Firewall neu can, sau do chia se link ma server in ra:
+
+```text
+http://<IP-may-chay>:5000/?token=doi-token-demo-rieng
+```
+
+Link hop le se luu cookie HttpOnly trong 12 gio. Neu khong dat
+`PSD2HTML_ACCESS_TOKEN`, server tu sinh token moi moi lan khoi dong. Khong mo
+webapp truc tiep ra Internet; co che nay chi danh cho demo noi bo/LAN.
+
+Man hinh dau co danh sach 30 job gan nhat, cho mo lai, xem dung luong va xoa
+thu cong. Webapp tu don job qua han khi khoi dong; mac dinh 7 ngay, cau hinh qua
+`PSD2HTML_JOB_TTL_DAYS` (`0` = khong tu dong don).
+
+Preview HTML di qua Flask va duoc bao ve boi token. Preview build React/Next
+chay tren mot port dong rieng va se bind ra LAN khi `PSD2HTML_HOST=0.0.0.0`;
+Windows Firewall co the hoi cho phep port nay. Preview build khong co lop token
+rieng, vi vay chi bat trong mang noi bo tin cay va dung preview sau khi test.
 Mở **http://localhost:5000** → kéo file PSD (desktop + tuỳ chọn mobile) → chọn định dạng (HTML / React / Next) → bấm **Chuyển đổi** → xem preview (HTML) và tải ZIP kết quả.
+
+### Ghép luồng từ tài liệu BA
+
+Sau khi phân tích PSD, bấm **Luồng BA** trong thanh công cụ:
+
+1. Upload tài liệu `.txt`, `.md`, `.docx`, `.xlsx` hoặc `.pdf` (tối đa 25 MB).
+2. Tool trích xuất các yêu cầu mở URL, mở popup và cuộn tới section.
+3. Kiểm tra lại layer, hành động và đích trong từng mapping.
+4. Bật các dòng cần dùng rồi bấm **Áp dụng mapping**.
+
+Mapping được ghi vào layer desktop, tự ghép sang layer mobile cùng tên nếu có,
+và file `flow-spec.json` được đặt trong ZIP xuất ra để dev/BA tiếp tục kiểm tra.
+Các đề xuất có độ tin cậy thấp luôn được đánh dấu **Cần kiểm tra**, tool không tự
+bịa URL, API hoặc nghiệp vụ còn thiếu.
+
+Với tài liệu đặc tả có cấu trúc `FT_xxx`, parser ưu tiên đọc các trường Tên Use
+Case, Tác nhân, Tiền/Hậu điều kiện, Điểm kích hoạt, Luồng chính và Ngoại lệ. Nếu
+không có cấu trúc này, parser quay về chế độ nhận diện câu hành động thông thường.
 
 ## Nhiều PSD — mỗi file 1 section (mới)
 
