@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from psd2html import ba_flow, export_web, parser, webapp
+from psd2html import ai_hybrid, ba_flow, export_web, parser, sectionize, webapp
 
 
 class _FakeLayer:
@@ -237,7 +237,330 @@ Luồng sự kiện chính | Người dùng nạp tại https://nap.example/; h�
                 webapp.jobs = old_jobs
 
 
+class CompositeHotspotTests(unittest.TestCase):
+    def test_composite_filters_large_auto_hitbox_and_merges_button_fragments(self):
+        board = {
+            "W": 1000,
+            "H": 1600,
+            "sections": [
+                {
+                    "comp": "Hero",
+                    "y0": 0,
+                    "repeats": [],
+                    "flat": [
+                        {
+                            "id": "title", "x": 20, "y": 100,
+                            "w": 850, "h": 120, "href": "#",
+                            "act": "history", "alt": "Lich su game",
+                            "hotspot_explicit": False,
+                        },
+                        {
+                            "id": "login-a", "x": 700, "y": 40,
+                            "w": 100, "h": 35, "href": "#",
+                            "act": "login", "alt": "Dang nhap",
+                            "hotspot_explicit": False,
+                        },
+                        {
+                            "id": "login-b", "x": 795, "y": 42,
+                            "w": 30, "h": 30, "href": "#",
+                            "act": "login", "alt": "icon login",
+                            "hotspot_explicit": False,
+                        },
+                    ],
+                },
+                {"comp": "Gift", "y0": 800, "repeats": [], "flat": []},
+            ],
+            "backgrounds": [], "fixed": [], "repeats": [],
+        }
+
+        export_web._prepare_composite_board(board, "desktop")
+
+        hotspots = board["sections"][0]["composite"]["hotspots"]
+        self.assertEqual(1, len(hotspots))
+        self.assertEqual("login", hotspots[0]["act"])
+        self.assertEqual((700, 40, 125, 35), tuple(
+            hotspots[0][key] for key in ("x", "y", "w", "h")
+        ))
+        self.assertEqual([], board["sections"][0]["flat"])
+        self.assertEqual([], board["backgrounds"])
+        self.assertTrue(board["composite_hotspots"])
+
+    def test_composite_assets_are_cropped_losslessly_by_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = Image.new("RGB", (20, 30), (10, 20, 30))
+            image.save(root / "screenshot.png")
+            board = {
+                "sections": [
+                    {"composite": {
+                        "filename": "desktop-section-1.webp",
+                        "y0": 0, "y1": 12, "w": 20,
+                    }},
+                    {"composite": {
+                        "filename": "desktop-section-2.webp",
+                        "y0": 12, "y1": 30, "w": 20,
+                    }},
+                ]
+            }
+
+            export_web._write_composite_assets(
+                root, {"screenshot": "screenshot.png"}, board,
+                root / "public" / "composite",
+            )
+
+            with Image.open(root / "public/composite/desktop-section-1.webp") as first:
+                self.assertEqual((20, 12), first.size)
+                self.assertEqual((10, 20, 30), first.getpixel((0, 0)))
+            with Image.open(root / "public/composite/desktop-section-2.webp") as second:
+                self.assertEqual((20, 18), second.size)
+
+    def test_composite_option_is_off_by_default_and_sent_to_backend(self):
+        old_token = webapp._ACCESS_TOKEN
+        webapp._ACCESS_TOKEN = ""
+        try:
+            html = webapp.app.test_client().get("/").get_data(as_text=True)
+        finally:
+            webapp._ACCESS_TOKEN = old_token
+        js = (webapp.BASE / "psd2html/static/js/app.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="composite_hotspots"', html)
+        self.assertNotIn('id="composite_hotspots" checked', html)
+        self.assertIn('"composite_hotspots"', js)
+        self.assertIn("syncCompositeOptions", js)
+
+class SmartHybridTests(unittest.TestCase):
+    def test_fallback_detects_dynamic_game_ui_conservatively(self):
+        def layer(layer_id, text, y, parent="group"):
+            return {
+                "id": layer_id, "kind": "type", "name": text,
+                "visible": True, "parent": parent,
+                "bbox": {"x": 10, "y": y, "width": 100, "height": 24},
+                "text": {"content": text, "font": "GameFont", "size": 30,
+                         "color": "#ffffff"},
+            }
+        layout = {"layers": [
+            layer("label", "Tổng lượt vung", 10),
+            layer("total", "10.000.000", 40),
+            layer("remain", "Số lượt vung còn lại: 0", 80, "spin"),
+            layer("spin", "Vung rìu x1", 120, "spin"),
+            layer("claim", "Nhận lượt", 160, "task"),
+            layer("claimed", "Đã nhận", 160, "task"),
+            layer("date", "2025-01-08 11:55:42", 220, "history"),
+            layer("title", "Vùng rìu thập bang", 260, "hero"),
+        ]}
+
+        roles = ai_hybrid.fallback_classification(layout)
+
+        self.assertEqual("total_spins", roles["total"]["binding"])
+        self.assertEqual("remaining_spins", roles["remain"]["binding"])
+        self.assertEqual("button", roles["spin"]["role"])
+        self.assertEqual("status", roles["claimed"]["role"])
+        self.assertNotIn("date", roles)
+        self.assertNotIn("title", roles)
+
+    def test_composite_board_keeps_hybrid_overlay_and_uses_button_art_hitbox(self):
+        board = {
+            "W": 1000, "H": 500, "backgrounds": [], "fixed": [], "repeats": [],
+            "_hybrid_roles": {"text": {
+                "role": "button", "binding": "spin_once", "action": "spin_1",
+                "text": "Vung riu x1", "font": "GameFont", "size": 30,
+                "color": "#fff",
+            }},
+            "sections": [{"comp": "Spin", "y0": 0, "repeats": [], "flat": [
+                {"id": "art", "x": 100, "y": 200, "w": 300, "h": 90,
+                 "t": False, "src": "/assets/art.webp"},
+                {"id": "text", "x": 180, "y": 230, "w": 130, "h": 28,
+                 "t": True, "src": "/assets/text.webp", "alt": "Vung riu x1"},
+            ]}],
+        }
+
+        export_web._prepare_composite_board(board, "desktop")
+        overlay = board["sections"][0]["composite"]["hybrid"][0]
+
+        self.assertEqual("spin_once", overlay["binding"])
+        self.assertEqual((100, 200, 300, 90), tuple(
+            overlay[key] for key in ("hx", "hy", "hw", "hh")
+        ))
+        source = export_web._gen_composite_section(board["sections"][0], "ts", False)
+        self.assertIn("hybridData", source)
+        self.assertIn("data-binding", source)
+        self.assertIn("spin_once", source)
+
+    def test_smart_hybrid_option_is_disabled_until_composite_is_enabled(self):
+        old_token = webapp._ACCESS_TOKEN
+        webapp._ACCESS_TOKEN = ""
+        try:
+            html = webapp.app.test_client().get("/").get_data(as_text=True)
+        finally:
+            webapp._ACCESS_TOKEN = old_token
+        js = (webapp.BASE / "psd2html/static/js/app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="smart_hybrid" disabled', html)
+        self.assertIn('"smart_hybrid"', js)
+        self.assertIn("hybrid.disabled = !composite.checked", js)
+
+class OIDCLoginTests(unittest.TestCase):
+    def test_vite_helper_uses_expected_env_and_safe_query_builder(self):
+        source = export_web._gen_oidc_auth("ts", client=False)
+
+        self.assertIn("VITE_APP_CLIENT_ID", source)
+        self.assertIn("VITE_APP_LOGIN_DOMAIN", source)
+        self.assertIn("new URLSearchParams", source)
+        self.assertIn('sessionStorage.setItem("oidc_state", state)', source)
+        self.assertNotIn("md5", source)
+        self.assertIn("verifyOidcState", source)
+        self.assertNotIn("&&protocol", source)
+
+    def test_next_helper_uses_public_env(self):
+        source = export_web._gen_oidc_auth("js", client=True)
+
+        self.assertTrue(source.startswith('"use client";'))
+        self.assertIn("NEXT_PUBLIC_APP_CLIENT_ID", source)
+        self.assertIn("NEXT_PUBLIC_APP_REDIRECT_URL", source)
+
+    def test_login_action_is_overridden_only_when_option_is_enabled(self):
+        effect = 'if (href && href !== "#") return; const url = LINKS[act];'
+
+        self.assertEqual(effect, export_web._with_oidc_login(effect, False))
+        self.assertIn(
+            'act === "login" ? "" : LINKS[act]',
+            export_web._with_oidc_login(effect, True),
+        )
+        self.assertIn(
+            'data-action") !== "login"', export_web._with_oidc_login(effect, True)
+        )
+
+    def test_option_is_visible_and_off_by_default(self):
+        old_token = webapp._ACCESS_TOKEN
+        webapp._ACCESS_TOKEN = ""
+        try:
+            html = webapp.app.test_client().get("/").get_data(as_text=True)
+        finally:
+            webapp._ACCESS_TOKEN = old_token
+        self.assertIn('id="oidc_login"', html)
+        self.assertNotIn('id="oidc_login" checked', html)
+
+    def test_landing_imports_login_helper_only_when_enabled(self):
+        board = {
+            "landing_name": "Landing", "W": 100, "H": 100,
+            "sections": [], "fixed": [], "backgrounds": [],
+        }
+        plain = export_web._gen_landing(board, "js", False, feats={})
+        enabled = export_web._gen_landing(
+            board, "js", False, feats={"oidc_login": True}
+        )
+
+        self.assertNotIn("handleLogin", plain)
+        self.assertIn('import { handleLogin } from "../utils/auth";', enabled)
+        self.assertIn('if (act === "login") { handleLogin(); return; }', enabled)
+
+
+class EditorReferencePreviewTests(unittest.TestCase):
+    def test_editor_defaults_to_exact_psd_composite_preview(self):
+        old_token = webapp._ACCESS_TOKEN
+        webapp._ACCESS_TOKEN = ""
+        try:
+            html = webapp.app.test_client().get("/").get_data(as_text=True)
+        finally:
+            webapp._ACCESS_TOKEN = old_token
+        js = (webapp.BASE / "psd2html/static/js/app.js").read_text(
+            encoding="utf-8"
+        )
+        css = (webapp.BASE / "psd2html/static/css/editor-shell.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="previewModeBtn"', html)
+        self.assertIn('let previewMode = "reference"', js)
+        self.assertIn('class="stageReference"', js)
+        self.assertIn("function ensureLayerPreview()", js)
+        self.assertIn(".stage.referenceMode .lyr", css)
+
 class ParserConfigTests(unittest.TestCase):
+    def test_photoshop_guides_are_converted_from_1_over_32_pixel(self):
+        info = SimpleNamespace(data=[
+            (30432, 1), (30720, 0), (57632, 1), (30432, 1),
+            (0, 1), (999999, 0),
+        ])
+        psd = SimpleNamespace(
+            width=1920,
+            height=5807,
+            image_resources=SimpleNamespace(get_data=lambda _resource: info),
+        )
+
+        guides = parser._collect_guides(psd)
+
+        self.assertEqual([951, 1801], guides["horizontal"])
+        self.assertEqual([960], guides["vertical"])
+
+    def test_horizontal_guides_define_sections_for_single_tall_psd(self):
+        layout = {
+            "canvas": {"width": 1920, "height": 5807},
+            "guides": {
+                "horizontal": [951, 1801, 2651, 3501, 4351],
+                "vertical": [240, 638, 960, 1277, 1680],
+            },
+            "layers": [
+                {
+                    "id": f"L{i}", "kind": "pixel",
+                    "bbox": {
+                        "x": 500, "y": y, "width": 300, "height": 100,
+                    },
+                }
+                for i, y in enumerate([400, 1200, 2050, 2900, 3750, 5000], 1)
+            ],
+        }
+
+        sections = sectionize.split_sections(layout)
+
+        self.assertEqual(
+            [(0, 951), (951, 1801), (1801, 2651), (2651, 3501),
+             (3501, 4351), (4351, 5807)],
+            [(s["y0"], s["y1"]) for s in sections],
+        )
+        self.assertEqual(
+            ["Section 1", "Section 2", "Section 3", "Section 4",
+             "Section 5", "Section 6"],
+            [s["name"] for s in sections],
+        )
+
+    def test_editor_manifest_uses_detected_guide_sections(self):
+        layout = {
+            "canvas": {"width": 1000, "height": 2400},
+            "guides": {"horizontal": [800, 1600], "vertical": []},
+            "screenshot": "screenshot.png",
+            "layers": [
+                {
+                    "id": "L1", "name": "Hero", "kind": "pixel",
+                    "parent": None, "bbox": {
+                        "x": 100, "y": 100, "width": 200, "height": 100,
+                    },
+                    "asset": "assets/L1.webp",
+                },
+                {
+                    "id": "L2", "name": "Gift", "kind": "pixel",
+                    "parent": None, "bbox": {
+                        "x": 100, "y": 1700, "width": 200, "height": 100,
+                    },
+                    "asset": "assets/L2.webp",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "layout.json").write_text(
+                json.dumps(layout), encoding="utf-8"
+            )
+
+            manifest = webapp._variant_manifest("demo", out, "")
+
+        self.assertEqual(
+            [(0, 800), (800, 1600), (1600, 2400)],
+            [(s["y0"], s["y1"]) for s in manifest["sections"]],
+        )
+        self.assertEqual([0, 2], [item["section"] for item in manifest["layers"]])
     def test_asset_config_is_per_parse(self):
         png = parser._asset_cfg("png", None, None)
         webp = parser._asset_cfg("webp", 77, 123)
@@ -264,6 +587,42 @@ class ParserConfigTests(unittest.TestCase):
 
 
 class JobSafetyTests(unittest.TestCase):
+    def test_result_and_download_reject_parent_job_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "jobs"
+            root.mkdir()
+            escaped_out = root.parent / "out"
+            escaped_out.mkdir()
+            (escaped_out / "proof.txt").write_text("secret", encoding="utf-8")
+            (root.parent / "result.zip").write_bytes(b"not-a-job")
+
+            old_token = webapp._ACCESS_TOKEN
+            webapp._ACCESS_TOKEN = ""
+            try:
+                with patch.object(webapp, "JOBS_DIR", root):
+                    client = webapp.app.test_client()
+                    self.assertEqual(
+                        404, client.get("/result/../proof.txt").status_code
+                    )
+                    self.assertEqual(404, client.get("/download/..").status_code)
+            finally:
+                webapp._ACCESS_TOKEN = old_token
+
+    def test_popup_variant_cannot_escape_to_another_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "job-a" / "out" / "_popups").mkdir(parents=True)
+            target = root / "job-b" / "out"
+            target.mkdir(parents=True)
+            (target / "layout.json").write_text("{}", encoding="utf-8")
+
+            with patch.object(webapp, "JOBS_DIR", root):
+                self.assertIsNone(
+                    webapp._variant_dir(
+                        "job-a", "popup:../../../job-b/out"
+                    )
+                )
+
     def test_new_job_id_skips_existing_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

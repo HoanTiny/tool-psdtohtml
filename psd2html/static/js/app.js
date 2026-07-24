@@ -17,14 +17,50 @@ let sel = null,
 let layerQuery = ""; // tu khoa tim trong danh sach layer
 let curSec = -1; // section dang xem rieng (-1 = tat ca)
 let previewZoom = 1; // he so phong khung xem truoc (1 = vua be rong cot)
+let previewMode = "reference"; // reference = composite PSD chuan, layers = tung layer de chinh sua
 let canvasScrollIntent = "top"; // top | bottom | preserve
 let canvasRestoreToken = 0;
 let draggedTreeItem = null;
 const undoStack = [];
 const redoStack = [];
 const HISTORY_LIMIT = 80;
+const pendingSaves = new Map();
 const undoBtn = document.getElementById("undoBtn");
 const redoBtn = document.getElementById("redoBtn");
+const previewModeBtn = document.getElementById("previewModeBtn");
+
+function updatePreviewModeControl() {
+  const reference = previewMode === "reference";
+  const stage = document.getElementById("stage");
+  if (stage) stage.classList.toggle("referenceMode", reference);
+  if (previewModeBtn) {
+    previewModeBtn.classList.toggle("active", reference);
+    previewModeBtn.setAttribute("aria-pressed", String(reference));
+    previewModeBtn.title = reference
+      ? "Dang xem composite PSD chuan. Bam de xem tung layer co the chinh sua."
+      : "Dang xem tung layer. Bam de doi chieu composite PSD chuan.";
+  }
+  const icon = document.getElementById("previewModeIcon");
+  const label = document.getElementById("previewModeLabel");
+  const hint = document.getElementById("previewHint");
+  if (icon) icon.textContent = reference ? "\u{1F5BC}" : "\u{1F9E9}";
+  if (label) label.textContent = reference ? "PSD chu\u1EA9n" : "T\u1EEBng layer";
+  if (hint) hint.textContent = reference
+    ? "Composite PSD chu\u1EA9n de doi chieu - chon layer van hoat dong"
+    : "T\u1EEBng layer de chinh sua - co the khac PSD voi clipping/effect phuc tap";
+}
+function setPreviewMode(mode) {
+  previewMode = mode === "layers" ? "layers" : "reference";
+  updatePreviewModeControl();
+}
+function ensureLayerPreview() {
+  if (previewMode === "reference") setPreviewMode("layers");
+}
+if (previewModeBtn) {
+  previewModeBtn.addEventListener("click", () =>
+    setPreviewMode(previewMode === "reference" ? "layers" : "reference"),
+  );
+}
 
 function cloneBBox(bbox) {
   return { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
@@ -41,6 +77,8 @@ function updateHistoryControls() {
 function clearEditHistory() {
   undoStack.length = 0;
   redoStack.length = 0;
+  pendingSaves.forEach((entry) => clearTimeout(entry.timer));
+  pendingSaves.clear();
   updateHistoryControls();
 }
 function recordBBoxHistory(layer, before, after, label) {
@@ -51,13 +89,14 @@ function recordBBoxHistory(layer, before, after, label) {
   updateHistoryControls();
 }
 function applyHistoryEntry(entry, bbox) {
+  cancelPendingSave(entry.tab, entry.layerId);
   curTab = entry.tab;
   const layer = variant().layers.find((item) => item.id === entry.layerId);
   if (!layer) return false;
   layer.bbox = cloneBBox(bbox);
   sel = layer.id;
   recomputeSection(layer);
-  saveEdit(layer.id, { bbox: layer.bbox });
+  saveEdit(layer.id, { bbox: layer.bbox }, entry.tab);
   render();
   selectLayer(layer.id, true);
   return true;
@@ -184,6 +223,36 @@ document.querySelectorAll("input[name=fmt]").forEach((r) =>
     if (isRN) document.getElementById("exportAcc").open = true; // mo tuy chon de thay
   }),
 );
+
+function syncCompositeOptions(notify = false) {
+  const composite = document.getElementById("composite_hotspots");
+  if (!composite) return;
+  let cleared = false;
+  ["fluid", "ai_enhance", "fx"].forEach((id) => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    if (composite.checked && input.checked) {
+      input.checked = false;
+      cleared = true;
+    }
+    input.disabled = composite.checked;
+    input.closest(".optionRow")?.classList.toggle("optionLocked", composite.checked);
+  });
+  const hybrid = document.getElementById("smart_hybrid");
+  if (hybrid) {
+    if (!composite.checked) hybrid.checked = false;
+    hybrid.disabled = !composite.checked;
+    hybrid.closest(".optionRow")?.classList.toggle("optionLocked", !composite.checked);
+  }
+  if (notify && cleared) {
+    toast("Composite dùng ảnh PSD nguyên bản nên đã tắt Fluid, AI productionize và hiệu ứng layer.");
+  }
+}
+const compositeHotspots = document.getElementById("composite_hotspots");
+if (compositeHotspots) {
+  compositeHotspots.addEventListener("change", () => syncCompositeOptions(true));
+  syncCompositeOptions();
+}
 // tim kiem layer trong danh sach
 document.getElementById("layerSearch").addEventListener("input", function (e) {
   layerQuery = (e.target.value || "").trim().toLowerCase();
@@ -550,6 +619,7 @@ function openEditor() {
   curSec = -1;
   layerQuery = "";
   previewZoom = 1;
+  previewMode = "reference";
   canvasScrollIntent = "top";
   document.getElementById("stage").dataset.rendered = "";
   document.getElementById("grpMode").classList.remove("active");
@@ -833,7 +903,15 @@ function render() {
   if (zl) zl.textContent = Math.round(previewZoom * 100) + "%";
   stage.style.width = v.canvas.width * scale + "px";
   stage.style.height = v.canvas.height * scale + "px";
-  let html = "";
+  updatePreviewModeControl();
+  let html =
+    '<img class="stageReference" src="' +
+    v.screenshot +
+    '" alt="" draggable="false" loading="eager" style="left:0;top:0;width:' +
+    v.canvas.width * scale +
+    'px;height:' +
+    v.canvas.height * scale +
+    'px">';
   // DEMO hieu ung: map l.fx -> class demo trong preview (+ lop luot sang neu can)
   const FX_BASE = {
     glow: "fx-glow",
@@ -1071,6 +1149,7 @@ function renderList() {
     };
     row.querySelector(".eye").onclick = (e) => {
       e.stopPropagation();
+      ensureLayerPreview();
       // Layer da bam "khong xuat" luon an, nen khong duoc dung no de quyet
       // dinh trang thai mat cua folder. Chi toggle cac layer con dang duoc xuat.
       const previewLeaves = leaves.filter((l) => !dis.has(l.id));
@@ -1148,6 +1227,7 @@ function leafRow(l, depth) {
     "</span>";
   it.querySelector(".eye").onclick = (e) => {
     e.stopPropagation();
+    ensureLayerPreview();
     setLayerShown(l, !isLayerShown(l));
     const off = !isLayerShown(l);
     it.classList.toggle("off", off);
@@ -1174,6 +1254,7 @@ function leafRow(l, depth) {
     };
   it.querySelector(".xout").onclick = (e) => {
     e.stopPropagation();
+    ensureLayerPreview();
     if (dis.has(l.id)) dis.delete(l.id);
     else {
       dis.add(l.id);
@@ -1549,6 +1630,7 @@ function drawSel() {
 }
 function startDrag(e, mode) {
   e.preventDefault();
+  ensureLayerPreview();
   const l = curLayer();
   if (!l) return;
   const s = {
@@ -1945,28 +2027,46 @@ function onNumChange() {
   recordBBoxHistory(l, before, cloneBBox(l.bbox), "Nhập transform");
   saveEdit(l.id, { bbox: l.bbox });
 }
-function saveEdits(patches) {
+function saveEdits(patches, targetTab = curTab, targetJob = JOB) {
+  const visualChange = Object.values(patches || {}).some(
+    (patch) => patch && ["bbox", "z", "text", "fx"].some((key) => key in patch),
+  );
+  if (visualChange) ensureLayerPreview();
   fetch("/edit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      job_id: JOB,
-      variant: curTab,
+      job_id: targetJob,
+      variant: targetTab,
       patch: patches,
     }),
   }).catch(() => {});
 }
-function saveEdit(id, patch) {
-  saveEdits({ [id]: patch });
+function saveEdit(id, patch, targetTab = curTab, targetJob = JOB) {
+  saveEdits({ [id]: patch }, targetTab, targetJob);
 }
-let _saveT = null,
-  _savePend = null;
+function pendingSaveKey(tab, id) {
+  return `${tab}\u0000${id}`;
+}
+function cancelPendingSave(tab, id) {
+  const key = pendingSaveKey(tab, id);
+  const pending = pendingSaves.get(key);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingSaves.delete(key);
+}
 function saveEditDebounced(id, patch) {
-  _savePend = { id, patch };
-  clearTimeout(_saveT);
-  _saveT = setTimeout(() => {
-    if (_savePend) saveEdit(_savePend.id, _savePend.patch);
+  const tab = curTab;
+  const job = JOB;
+  const key = pendingSaveKey(tab, id);
+  cancelPendingSave(tab, id);
+  const timer = setTimeout(() => {
+    const pending = pendingSaves.get(key);
+    if (!pending) return;
+    pendingSaves.delete(key);
+    saveEdit(pending.id, pending.patch, pending.tab, pending.job);
   }, 350);
+  pendingSaves.set(key, { timer, id, patch, tab, job });
 }
 // click nen preview: chon layer roi press-drag di chuyen; click nen trong -> bo chon
 document.getElementById("stage").addEventListener("pointerdown", function (e) {
@@ -2186,7 +2286,10 @@ goExport.onclick = async () => {
   };
   [
     "swiper_lib",
+    "composite_hotspots",
+    "smart_hybrid",
     "env_config",
+    "oidc_login",
     "nav_menu",
     "popups",
     "ai_enhance",

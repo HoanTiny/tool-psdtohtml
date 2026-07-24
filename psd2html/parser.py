@@ -35,6 +35,7 @@ from pathlib import Path
 from PIL import Image
 from psd_tools import PSDImage
 from psd_tools.api.layers import Artboard
+from psd_tools.constants import Resource
 
 from .sectionize import is_background
 
@@ -184,6 +185,33 @@ def _collect_artboards(psd):
 
     walk(psd)
     return boards
+
+
+def _collect_guides(psd):
+    """
+    Lay guide Photoshop trong Image Resources.
+
+    PSD luu vi tri guide theo don vi 1/32 pixel; direction 0 = vertical,
+    direction 1 = horizontal. Horizontal guide duoc dung lam moc section cho
+    PSD landing dai neu designer da dat guide san.
+    """
+    result = {"horizontal": [], "vertical": []}
+    try:
+        info = psd.image_resources.get_data(Resource.GRID_AND_GUIDES_INFO)
+        if info is None:
+            return result
+        for raw_position, direction in info.data:
+            position = int(round(raw_position / 32))
+            axis = "horizontal" if int(direction) == 1 else "vertical"
+            limit = psd.height if axis == "horizontal" else psd.width
+            if 0 < position < limit:
+                result[axis].append(position)
+    except Exception:
+        return result
+
+    result["horizontal"] = sorted(set(result["horizontal"]))
+    result["vertical"] = sorted(set(result["vertical"]))
+    return result
 
 
 # Anh xa blend mode cua PSD -> gia tri CSS mix-blend-mode
@@ -617,12 +645,20 @@ def parse_psd(psd_path, out_dir, asset_fmt=None, webp_quality=None, webp_lossles
     artboards = _collect_artboards(psd)
     if artboards:
         print(f"      Tim thay {len(artboards)} artboard")
+    guides = _collect_guides(psd)
+    if guides["horizontal"] or guides["vertical"]:
+        print(
+            "      Tim thay "
+            f"{len(guides['horizontal'])} guide ngang, "
+            f"{len(guides['vertical'])} guide doc"
+        )
 
     layout = {
         "source": psd_path.name,
         "canvas": {"width": psd.width, "height": psd.height},
         "screenshot": "screenshot.png",
         "artboards": artboards,
+        "guides": guides,
         "layers": layers,
     }
 

@@ -187,6 +187,15 @@
             <span><b>Tính năng production</b><small>Bật những thành phần project cần sử dụng</small></span>
           </div>
           <div class="optionList">
+            <label class="optionRow featuredOption">
+              <input type="checkbox" id="composite_hotspots">
+              <span class="optionText"><b>Composite + hotspot</b><small>D&#249;ng &#7843;nh section chu&#7849;n PSD v&#224; ph&#7911; v&#249;ng b&#7845;m trong su&#7889;t</small></span>
+              <span class="toggleUI"></span>
+            </label>            <label class="optionRow premiumOption optionLocked">
+              <input type="checkbox" id="smart_hybrid" disabled>
+              <span class="optionText"><b>AI hybrid &#8212; t&#225;ch v&#249;ng &#273;&#7897;ng</b><small>T&#7921; nh&#7853;n di&#7879;n s&#7889; li&#7879;u, tr&#7841;ng th&#225;i, tab v&#224; CTA &#273;&#7875; n&#7889;i API</small></span>
+              <span class="toggleUI"></span>
+            </label>
             <label class="optionRow">
               <input type="checkbox" id="swiper_lib">
               <span class="optionText"><b>Swiper.js</b><small>Slider chuẩn, hỗ trợ touch và hiệu ứng fade</small></span>
@@ -195,6 +204,11 @@
             <label class="optionRow">
               <input type="checkbox" id="env_config">
               <span class="optionText"><b>Biến môi trường</b><small>Cấu hình link/API qua <code>.env</code></small></span>
+              <span class="toggleUI"></span>
+            </label>
+            <label class="optionRow">
+              <input type="checkbox" id="oidc_login">
+              <span class="optionText"><b>&#272;&#259;ng nh&#7853;p VPlay/OIDC</b><small>Sinh lu&#7891;ng &#273;&#259;ng nh&#7853;p d&#249;ng bi&#7871;n m&#244;i tr&#432;&#7901;ng, m&#7863;c &#273;&#7883;nh t&#7855;t</small></span>
               <span class="toggleUI"></span>
             </label>
             <label class="optionRow">
@@ -256,12 +270,13 @@
         <div class="canvasToolbar">
           <span class="toolActive">↖ Chọn</span>
           <span>Giữ Space để di chuyển canvas</span>
+          <button class="ghost sm previewModeBtn" id="previewModeBtn" type="button" title="Doi che do xem"><span id="previewModeIcon">&#128444;</span> <span id="previewModeLabel">PSD chu&#7849;n</span></button>
           <button class="ghost sm" id="fitCanvas" type="button" title="Co canvas vừa chiều rộng vùng làm việc">Fit width</button>
         </div>
         <div class="assetStats" id="assetStats" title="Thong ke asset sau khi khu trung lap"></div>
         <div class="secNav" id="secNav"></div>
         <div class="pvtop">
-          <span>Nhấp để chọn &middot; kéo để chỉnh</span>
+          <span id="previewHint">Nhấp để chọn &middot; kéo để chỉnh</span>
           <span class="zoom"><button id="zOut" title="Thu nhỏ">&minus;</button><b id="zLbl">100%</b><button id="zIn" title="Phóng to">+</button></span>
         </div>
         <div class="stageClip" id="stageClip"><div class="stage" id="stage"></div></div>

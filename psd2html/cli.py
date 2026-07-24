@@ -65,6 +65,8 @@ def main():
                          "4->2->1 cot theo viewport). Chi ap khi KHONG dung --mobile. Desktop giu nguyen.")
     ap.add_argument("--ai-enhance", action="store_true",
                     help="React/Next: nho AI 'prod-hoa' tung section (chu thuong->text that, CTA->button hover). Can ANTHROPIC_API_KEY (.env).")
+    ap.add_argument("--smart-hybrid", action="store_true",
+                    help="React/Next: composite tinh + AI tach so lieu/trang thai/nut thanh overlay noi API.")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--slices", action="store_true",
                       help="Cat anh truc tiep (pixel-perfect, KHONG dung AI) - hop landing nhieu do hoa")
@@ -103,7 +105,8 @@ def main():
         from .export_web import export
         feats = {"swiper_lib": args.swiper_lib, "popups": args.popups,
                  "env_config": args.env_config, "nav_menu": args.nav_menu,
-                 "ai_enhance": args.ai_enhance, "fluid": args.fluid}
+                 "ai_enhance": args.ai_enhance, "fluid": args.fluid,
+                 "smart_hybrid": args.smart_hybrid}
         proj = export(args.out, framework=fw, lang=args.lang, mobile_dir=mobile_dir,
                       detect_repeats=args.repeats, swiper=args.swiper, feats=feats)
         print(f"\nHOAN TAT -> {proj}")

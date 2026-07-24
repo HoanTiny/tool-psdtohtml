@@ -225,6 +225,8 @@
 }
 
 .optionRow:hover{border-color:#42638f;background:#0f1d32}
+.optionRow.optionLocked{opacity:.48;cursor:not-allowed;background:#0a1322}
+.optionRow.optionLocked:hover{border-color:#273956;background:#0a1322}
 .optionRow:has(input:checked){
   border-color:#3f83dc;
   background:linear-gradient(90deg,#102a4b,#0e1d33);

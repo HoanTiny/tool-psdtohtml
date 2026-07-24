@@ -225,6 +225,25 @@ body:has(#editor.show) #parsePanel{display:none!important}
   box-shadow:0 16px 50px rgba(0,0,0,.48);
 }
 #editor.show .stage{touch-action:pan-x pan-y}
+.stage .stageReference{
+  display:none;
+  pointer-events:none;
+  user-select:none;
+  z-index:0;
+}
+.stage.referenceMode .stageReference{display:block}
+.stage.referenceMode .lyr{
+  opacity:0!important;
+  animation:none!important;
+}
+.stage.referenceMode .lyr-fxshine{display:none!important}
+.canvasToolbar .previewModeBtn{margin-left:auto}
+.canvasToolbar #fitCanvas{margin-left:0}
+.previewModeBtn.active{
+  border-color:#38bdf8!important;
+  color:#dff7ff!important;
+  background:#0c2940!important;
+}
 
 #editor.show .rightDock{
   grid-area:inspector;

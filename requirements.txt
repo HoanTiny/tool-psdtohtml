@@ -1,8 +1,9 @@
-psd-tools>=1.17
+psd-tools[composite]>=1.17
 Pillow>=10
 anthropic>=0.40
 flask>=3.0            # giao dien web keo-tha (python -m psd2html.webapp)
 pypdf>=5.0            # doc noi dung tai lieu BA dang PDF
+scikit-image>=0.22  # psd-tools composite can de render lai PSD bo layer dong (AI hybrid)
 scipy>=1.10          # BAT BUOC: psd-tools can scipy de render layer co gradient fill
                       # (thieu se lam layer gradient/nhan vat khong xuat duoc anh)
 # Chi can khi muon tu sinh file PSD mau de test:

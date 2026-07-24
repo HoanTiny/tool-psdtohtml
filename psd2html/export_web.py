@@ -281,7 +281,10 @@ def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id, fx_aut
         tx = l.get("text") or {}
         as_text = bool(tx.get("asText") and tx.get("content"))
         popup = lk.get("popup")   # click layer nay -> mo popup (tu PSD popup)
-        is_btn = bool(lk.get("button") or lk.get("url") or lk.get("action") or popup) or _is_interactive(l)
+        explicit_hotspot = bool(
+            lk.get("button") or lk.get("url") or lk.get("action") or popup
+        )
+        is_btn = explicit_hotspot or _is_interactive(l)
         item = {"id": l["id"], "src": _src(l["asset"], asset_dir),
                 "x": b["x"] - ax, "y": b["y"] - ay, "w": b["width"], "h": b["height"],
                 "o": l.get("opacity", 1), "blend": l.get("blend"),
@@ -291,6 +294,7 @@ def _build_flat(layers, ab_bbox, exclude, asset_dir, menu_ids, toggle_id, fx_aut
                 "href": ("#" if popup else (lk.get("url") or ("#" if is_btn else None))),
                 "act": (("popup:" + str(popup)) if popup
                         else (lk.get("action") or (_action_of(l) if is_btn else None))),
+                "hotspot_explicit": explicit_hotspot,
                 "t": l.get("kind") == "type"}
         if as_text:   # CHU THAT: render text node thay vi img (tru cot 2)
             item["asText"] = True
@@ -489,7 +493,8 @@ def _gen_types():
         "  id: number; x: number; y: number; claimed?: boolean; cls?: string;\n"
         "  items?: SlotItem[]; [key: string]: unknown;\n}\n\n"
         "export interface SectionProps {\n"
-        "  onClaim?: (id: number) => void; menuOpen?: boolean; onToggleMenu?: () => void;\n}\n"
+        "  onClaim?: (id: number) => void; menuOpen?: boolean; onToggleMenu?: () => void;\n"
+        "  hybridData?: Record<string, string | number | boolean>;\n}\n"
     )
 
 
@@ -944,6 +949,294 @@ def _gen_repeat(rp, lang, client):
     return "\n".join(L)
 
 
+def _merge_composite_hotspots(items, gap=8):
+    """Gop cac manh text/icon lien ke cua cung mot nut thanh mot hitbox."""
+    merged = [dict(item) for item in items]
+    changed = True
+    while changed:
+        changed = False
+        result = []
+        while merged:
+            current = merged.pop(0)
+            index = 0
+            while index < len(merged):
+                other = merged[index]
+                same_action = (
+                    current.get("href") == other.get("href")
+                    and current.get("act") == other.get("act")
+                )
+                dx = max(
+                    0,
+                    other["x"] - (current["x"] + current["w"]),
+                    current["x"] - (other["x"] + other["w"]),
+                )
+                dy = max(
+                    0,
+                    other["y"] - (current["y"] + current["h"]),
+                    current["y"] - (other["y"] + other["h"]),
+                )
+                if not same_action or dx > gap or dy > gap:
+                    index += 1
+                    continue
+                x0 = min(current["x"], other["x"])
+                y0 = min(current["y"], other["y"])
+                x1 = max(current["x"] + current["w"], other["x"] + other["w"])
+                y1 = max(current["y"] + current["h"], other["y"] + other["h"])
+                if other["w"] * other["h"] > current["w"] * current["h"]:
+                    current["alt"] = other.get("alt") or current.get("alt")
+                current.update({"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0})
+                current["hotspot_explicit"] = bool(
+                    current.get("hotspot_explicit") or other.get("hotspot_explicit")
+                )
+                merged.pop(index)
+                changed = True
+            result.append(current)
+        merged = result
+    for item in merged:
+        item.pop("hotspot_explicit", None)
+    return merged
+
+
+def _dedupe_hybrid_overlays(items):
+    """Bo variant trung bbox/binding; uu tien trang thai `da nhan` de khop PSD."""
+    result = []
+    for item in items:
+        duplicate = None
+        for index, current in enumerate(result):
+            if current.get("binding") != item.get("binding"):
+                continue
+            ix0 = max(current["x"], item["x"])
+            iy0 = max(current["y"], item["y"])
+            ix1 = min(current["x"] + current["w"], item["x"] + item["w"])
+            iy1 = min(current["y"] + current["h"], item["y"] + item["h"])
+            inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+            smaller = min(current["w"] * current["h"], item["w"] * item["h"])
+            if smaller and inter / smaller >= 0.65:
+                duplicate = index
+                break
+        if duplicate is None:
+            result.append(item)
+            continue
+        old = result[duplicate]
+        if "da nhan" in _ascii(item.get("text", "")):
+            result[duplicate] = item
+        elif "da nhan" not in _ascii(old.get("text", "")) and item["w"] * item["h"] > old["w"] * old["h"]:
+            result[duplicate] = item
+    return result
+
+
+def _prepare_composite_board(board, prefix):
+    """Chuyen board thanh composite section + hotspot/overlay hybrid."""
+    sections = board.get("sections") or []
+    roles = board.get("_hybrid_roles") or {}
+    ys = [int(sec.get("y0", 0)) for sec in sections]
+    bands = [
+        (ys[i], max(1, (ys[i + 1] if i + 1 < len(ys) else board["H"]) - ys[i]))
+        for i in range(len(sections))
+    ]
+
+    def hotspot_of(item, y0, item_id=None, href=None, act=None):
+        return {
+            "id": item_id or item.get("id"),
+            "x": round(item.get("x", 0)), "y": round(item.get("y", 0) - y0),
+            "w": max(1, round(item.get("w", 1))), "h": max(1, round(item.get("h", 1))),
+            "href": href if href is not None else item.get("href"),
+            "act": act if act is not None else item.get("act"),
+            "alt": item.get("alt") or "Tuong tac",
+            "hotspot_explicit": bool(item.get("hotspot_explicit")),
+        }
+
+    def visual_hitbox(item, flat, role):
+        if role.get("role") not in ("button", "tab"):
+            return item["x"], item["y"], item["w"], item["h"]
+        cx, cy = item["x"] + item["w"] / 2, item["y"] + item["h"] / 2
+        covers = []
+        for candidate in flat:
+            if candidate.get("id") == item.get("id") or candidate.get("t"):
+                continue
+            if (candidate["x"] <= cx <= candidate["x"] + candidate["w"]
+                    and candidate["y"] <= cy <= candidate["y"] + candidate["h"]):
+                ratio = candidate["w"] * candidate["h"] / max(1, item["w"] * item["h"])
+                if 1.05 <= ratio <= 35:
+                    covers.append((candidate["w"] * candidate["h"], candidate))
+        if covers:
+            target = min(covers, key=lambda pair: pair[0])[1]
+            return target["x"], target["y"], target["w"], target["h"]
+        scale_x = 2.5 if role.get("role") == "button" else 2.0
+        scale_y = 3.0 if role.get("role") == "button" else 1.8
+        w, h = item["w"] * scale_x, item["h"] * scale_y
+        return item["x"] - (w - item["w"]) / 2, item["y"] - (h - item["h"]) / 2, w, h
+
+    for i, sec in enumerate(sections):
+        y0, height = bands[i]
+        flat = sec.get("flat", [])
+        hybrid = []
+        for item in flat:
+            role = roles.get(item.get("id"))
+            if not role or item.get("hidden"):
+                continue
+            hx, hy, hw, hh = visual_hitbox(item, flat, role)
+            hybrid.append({
+                "id": item["id"], "x": round(item["x"]), "y": round(item["y"] - y0),
+                "w": round(item["w"]), "h": round(item["h"]),
+                "hx": round(hx), "hy": round(hy - y0), "hw": round(hw), "hh": round(hh),
+                "role": role.get("role"), "binding": role.get("binding") or item["id"],
+                "action": role.get("action") or "", "text": role.get("text") or item.get("alt") or "",
+                "font": role.get("font"), "size": role.get("size"), "color": role.get("color") or "#ffffff",
+                "src": item.get("src"),
+            })
+        hybrid = _dedupe_hybrid_overlays(hybrid)
+        hybrid_ids = {item["id"] for item in hybrid}
+        candidates = [
+            hotspot_of(item, y0) for item in flat
+            if item.get("href") and not item.get("hidden") and item.get("id") not in hybrid_ids
+        ]
+        hotspots = _merge_composite_hotspots([
+            item for item in candidates
+            if item.get("hotspot_explicit") or (
+                item["w"] <= board["W"] * 0.5 and item["h"] <= height * 0.3
+                and item["w"] * item["h"] <= board["W"] * height * 0.12
+            )
+        ])
+        name = f"{prefix}-section-{i + 1}.webp"
+        sec["composite"] = {
+            "src": f"/composite/{name}", "filename": name,
+            "y0": y0, "y1": y0 + height, "w": board["W"], "h": height,
+            "hotspots": hotspots, "hybrid": hybrid, "lcp": i == 0,
+        }
+        sec["flat"] = []
+        sec["repeats"] = []
+
+    # Fixed nav da nam trong composite; chi giu hitbox dieu huong.
+    for index, item in enumerate(board.get("fixed", [])):
+        nav, href = item.get("nav"), item.get("href")
+        if nav is None and not href:
+            continue
+        cy = item.get("y", 0) + item.get("h", 0) / 2
+        sec_index = 0
+        for i, (y0, height) in enumerate(bands):
+            if y0 <= cy < y0 + height:
+                sec_index = i
+                break
+        target = sections[sec_index]["composite"]
+        target["hotspots"].append(hotspot_of(
+            item, target["y0"], f"fixed-{index}", href or "#",
+            f"scroll:{nav}" if nav is not None else None,
+        ))
+        target["hotspots"][-1].pop("hotspot_explicit", None)
+
+    board["backgrounds"] = []
+    board["fixed"] = []
+    board["repeats"] = []
+    board["composite_hotspots"] = True
+
+def _write_composite_assets(vdir, layout, board, public_dir):
+    """Cat screenshot composite theo band section va luu WebP lossless."""
+    from PIL import Image
+
+    source = Path(vdir) / board.get("_composite_source", layout.get("screenshot", "screenshot.png"))
+    if not source.exists():
+        raise FileNotFoundError(f"Khong tim thay composite PSD: {source}")
+    public_dir = Path(public_dir)
+    public_dir.mkdir(parents=True, exist_ok=True)
+    with Image.open(source) as image:
+        image = image.convert("RGB")
+        for sec in board.get("sections", []):
+            comp = sec.get("composite")
+            if not comp:
+                continue
+            y0 = max(0, min(image.height, int(comp["y0"])))
+            y1 = max(y0 + 1, min(image.height, int(comp["y1"])))
+            crop = image.crop((0, y0, min(image.width, int(comp["w"])), y1))
+            crop.save(
+                public_dir / comp["filename"],
+                "WEBP", lossless=True, method=6,
+            )
+
+
+def _gen_composite_section(sec, lang, client):
+    """Component section: composite tinh + hotspot + overlay co the noi API."""
+    head = '"use client";\n\n' if client else ""
+    comp = sec["composite"]
+    hotspots = []
+    for item in comp.get("hotspots", []):
+        data = dict(item)
+        data["cls"] = _tw_pos(data["x"], data["y"], data["w"], data["h"])
+        hotspots.append(data)
+    hybrid = []
+    for item in comp.get("hybrid", []):
+        data = dict(item)
+        data["cls"] = _tw_pos(data["x"], data["y"], data["w"], data["h"])
+        data["hitCls"] = _tw_pos(data["hx"], data["hy"], data["hw"], data["hh"])
+        hybrid.append(data)
+    hotspot_ann = (
+        ": Array<{ id: string; x: number; y: number; w: number; h: number; "
+        "href: string | null; act: string | null; alt: string; cls: string }>"
+        if lang == "ts" else ""
+    )
+    hybrid_ann = (
+        ": Array<{ id: string; x: number; y: number; w: number; h: number; "
+        "hx: number; hy: number; hw: number; hh: number; role: string; binding: string; "
+        "action: string; text: string; font: string | null; size: number | null; "
+        "color: string; src: string | null; cls: string; hitCls: string }>"
+        if lang == "ts" else ""
+    )
+    hotspot_decl = json.dumps(hotspots, ensure_ascii=False, indent=2)
+    hybrid_decl = json.dumps(hybrid, ensure_ascii=False, indent=2)
+    sig = f"_props{_ann(lang, 'SectionProps')}"
+    imp = 'import type { SectionProps } from "../../types/landing";\n\n' if lang == "ts" else ""
+    loading = 'loading="eager" fetchPriority="high"' if comp.get("lcp") else 'loading="lazy"'
+    return head + imp + (
+        f"const hotspots{hotspot_ann} = {hotspot_decl};\n\n"
+        f"const hybrid{hybrid_ann} = {hybrid_decl};\n\n"
+        f"export default function {sec['comp']}({sig}) {{\n"
+        "  const hybridData = _props.hybridData || {};\n"
+        "  return (\n"
+        "    <>\n"
+        f'      <img src="{comp["src"]}" alt="" aria-hidden="true" width={{{comp["w"]}}} height={{{comp["h"]}}}\n'
+        f'        {loading} decoding="async" className="absolute left-0 top-0 block h-full w-full select-none" />\n'
+        "      {hybrid.map((item) => {\n"
+        "        const changed = Object.prototype.hasOwnProperty.call(hybridData, item.binding);\n"
+        "        const value = changed ? hybridData[item.binding] : item.text;\n"
+        "        const fontSize = Math.max(12, Math.min(item.h * 1.08, Number(item.size || item.h)));\n"
+        "        const interactive = item.role === \"button\" || item.role === \"tab\";\n"
+        "        return (\n"
+        "          <span key={item.id} className=\"contents\">\n"
+        "            {!changed && item.src ? (\n"
+        "              <img src={item.src} alt=\"\" aria-hidden=\"true\" className={\"pointer-events-none absolute z-[30] block \" + item.cls} />\n"
+        "            ) : (\n"
+        "              <span data-binding={item.binding} aria-live={item.role === \"dynamic_text\" || item.role === \"status\" ? \"polite\" : undefined}\n"
+        "                className={\"pointer-events-none absolute z-[30] flex items-center justify-center whitespace-nowrap text-center font-bold \" + item.cls}\n"
+        "                style={{ color: item.color, fontFamily: item.font || undefined, fontSize, lineHeight: 1 }}>\n"
+        "                {String(value ?? \"\")}\n"
+        "              </span>\n"
+        "            )}\n"
+        "            {interactive ? (\n"
+        "              <button type=\"button\" data-action={item.action || \"other\"} data-binding={item.binding}\n"
+        "                aria-label={String(value || item.text)} title={String(value || item.text)}\n"
+        "                className={\"hot absolute z-[31] cursor-pointer border-0 bg-transparent transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300 \" + item.hitCls}>\n"
+        "                <span className=\"sr-only\">{String(value || item.text)}</span>\n"
+        "              </button>\n"
+        "            ) : null}\n"
+        "          </span>\n"
+        "        );\n"
+        "      })}\n"
+        "      {hotspots.map((hotspot) => {\n"
+        "        const external = /^https?:/.test(hotspot.href || \"\");\n"
+        "        return (\n"
+        "          <a key={hotspot.id} href={hotspot.href || \"#\"} data-action={hotspot.act || \"other\"}\n"
+        "            target={external ? \"_blank\" : undefined} rel={external ? \"noopener noreferrer\" : undefined}\n"
+        "            aria-label={hotspot.alt} title={hotspot.alt}\n"
+        "            className={\"hot absolute z-[20] block cursor-pointer bg-transparent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 \" + hotspot.cls}>\n"
+        "            <span className=\"sr-only\">{hotspot.alt}</span>\n"
+        "          </a>\n"
+        "        );\n"
+        "      })}\n"
+        "    </>\n"
+        "  );\n"
+        "}\n"
+    )
+
 def _gen_section(sec, lang, client):
     head = '"use client";\n\n' if client else ""
     # Neu section da duoc AI "prod-hoa" -> dung luon JSX do (chu that + hover + semantic).
@@ -1179,7 +1472,8 @@ def _fluid_slots(rp, item_ref, lang):
     return out
 
 
-def _gen_fluid_mobile(board, lang, client, config_rel="../../landing.config"):
+def _gen_fluid_mobile(board, lang, client, config_rel="../../landing.config",
+                      oidc_login=False):
     """Layout MOBILE co gian THAT (opt-in --fluid): section xep doc (flow), moi
     section:
       - Khong co luoi deu -> canvas ti le khoa (aspect-ratio), art dinh vi % ->
@@ -1187,6 +1481,9 @@ def _gen_fluid_mobile(board, lang, client, config_rel="../../landing.config"):
       - Co luoi deu -> backdrop scene + grid REFLOW: the dung clamp()+aspect-ratio,
         flex-wrap tu be 4->2->1 cot theo viewport (giong ban production)."""
     head = '"use client";\n\n' if client else ""
+    auth_rel = "../../lib/auth" if client else "../utils/auth"
+    auth_import = f'import {{ handleLogin }} from "{auth_rel}";\n' if oidc_login else ""
+
     W, H = board["W"], board["H"]
     secs = board["sections"]
     ys = [s.get("y0", 0) for s in secs]
@@ -1198,7 +1495,7 @@ def _gen_fluid_mobile(board, lang, client, config_rel="../../landing.config"):
         return y0 <= cy < y0 + hb
 
     refann = "<HTMLDivElement>" if lang == "ts" else ""
-    L = [head + f'import {{ useEffect, useRef }} from "react";\nimport {{ LINKS }} from "{config_rel}";\n',
+    L = [head + f'import {{ useEffect, useRef }} from "react";\nimport {{ LINKS }} from "{config_rel}";\n' + auth_import,
          "// Layout mobile co gian (fluid): sinh boi che do --fluid. Desktop dung ban rieng.",
          "export default function MobileFluid() {",
          f"  const onClaim = (id{_ann(lang, 'number')}) => {{ console.log('claim', id); }};",
@@ -1208,7 +1505,8 @@ def _gen_fluid_mobile(board, lang, client, config_rel="../../landing.config"):
          "    const onClick = (e) => { const a = (e.target" + (" as HTMLElement" if lang == "ts" else "")
          + ').closest(".hot"); if (!a || !root.contains(a)) return;',
          '      const act = a.getAttribute("data-action"); if (!act) return;',
-         "      const url = LINKS[act]; if (url) { e.preventDefault(); window.open(url, '_blank', 'noopener,noreferrer'); } };",
+         ('      if (act === "login") { e.preventDefault(); handleLogin(); return; }\n' if oidc_login else "")
+         + "      const url = LINKS[act]; if (url) { e.preventDefault(); window.open(url, '_blank', 'noopener,noreferrer'); } };",
          "    root.addEventListener('click', onClick);",
          "    return () => root.removeEventListener('click', onClick);",
          "  }, []);",
@@ -1316,6 +1614,20 @@ def _page_desc(board):
     return (" · ".join(_ctext_of(l) for l in txts[:6]) or _page_title(board))[:160]
 
 
+def _with_oidc_login(effect, enabled):
+    """Buoc action login di qua helper OIDC thay vi LINKS.login khi opt-in."""
+    if not enabled:
+        return effect
+    return (
+        effect.replace(
+            "const url = LINKS[act];", 'const url = act === "login" ? "" : LINKS[act];'
+        ).replace(
+            'if (href && href !== "#") return;',
+            'if (href && href !== "#" && a.getAttribute("data-action") !== "login") return;',
+        )
+    )
+
+
 def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=None,
                  config_rel="../../landing.config", comp_base="."):
     head = '"use client";\n\n' if client else ""
@@ -1324,6 +1636,8 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
     W, H = board["W"], board["H"]
     secs = board["sections"]
     feats = feats or {}
+    oidc_login = bool(feats.get("oidc_login"))
+    auth_rel = "../../lib/auth" if client else "../utils/auth"
     swiper_lib = bool(feats.get("swiper_lib")) and bool(secs)
     swiper = (swiper and bool(secs)) or swiper_lib
     # fx_reveal: section nay/zoom vao khi cuon toi (scroll) / chuyen slide (deck). Class
@@ -1340,6 +1654,8 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
 
     imports = ['import { useState, useEffect, useRef } from "react";',
                f'import {{ LINKS, LABELS }} from "{config_rel}";']
+    if oidc_login:
+        imports.append(f'import {{ handleLogin }} from "{auth_rel}";')
     if swiper_lib:  # dung thu vien Swiper.js that (giong prod)
         imports.insert(1, 'import { Swiper, SwiperSlide } from "swiper/react";')
         imports.insert(2, 'import { Mousewheel, EffectFade } from "swiper/modules";')
@@ -1365,14 +1681,25 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
     L.append(f"  const [modal, setModal] = useState{modal_ty}(null);")
     L.append(f"  const onClaim = (id{_ann(lang, 'number')}) => {{ console.log('claim', id); }};")
     L.append("  const onToggleMenu = () => setMenuOpen((o) => !o);")
-    L.append("  const props = { onClaim, menuOpen, onToggleMenu };")
+    if board.get("hybrid_mode"):
+        L.append(f"  const hybridData{_ann(lang, 'Record<string, string | number | boolean>')} = {{}};")
+        L.append("  // TODO: gan hybridData tu API (total_spins, remaining_spins, task_*_status...).")
+        L.append("  const props = { onClaim, menuOpen, onToggleMenu, hybridData };")
+    else:
+        L.append("  const props = { onClaim, menuOpen, onToggleMenu };")
     if popups:
         L.append(f"  const [popup, setPopup] = useState{pop_ty}(null);")
-        L.append("  const openAction = (act) => setPopup(act);  // mo popup theo loai nut")
+        L.append("  const openAction = (act) => {")
+        if oidc_login:
+            L.append('    if (act === "login") { handleLogin(); return; }')
+        L.append("    setPopup(act);  // mo popup theo loai nut")
+        L.append("  };")
     else:
         # UX: KHONG lo ten bien cau hinh (LINKS.<act>) ra UI cho nguoi dung cuoi.
         # Chi hien thong bao chung; nhac dev qua console.warn (chi hien khi dev).
         L.append("  const openAction = (act) => {")
+        if oidc_login:
+            L.append('    if (act === "login") { handleLogin(); return; }')
         L.append('    if (process.env.NODE_ENV !== "production") '
                  "console.warn('[landing] Chua cau hinh link cho \"' + act + '\". "
                  "Dien URL vao LINKS.' + act + ' trong landing.config, hoac goi API tai openAction().');")
@@ -1415,7 +1742,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         L.append("  const [activeIndex, setActiveIndex] = useState(0);")
         L.append(f"  const swiperRef = useRef{refany}(null);")
         L.append(f"  const rootRef = useRef{('<HTMLDivElement>' if lang == 'ts' else '')}(null);")
-        L.append(_LANDING_SWIPERLIB_EFFECT.replace("__N__", str(len(secs))).replace("__W__", str(W))
+        L.append(_with_oidc_login(_LANDING_SWIPERLIB_EFFECT, oidc_login).replace("__N__", str(len(secs))).replace("__W__", str(W))
                  .replace("__QS__", qs).replace("__ASH__", ash))
         L.append("  return (")
         L.append(f'    <main ref={{rootRef}}{main_cls}>')
@@ -1441,7 +1768,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         L += ["    </main>", "  );", "}", ""]
     elif swiper:
         max_sec_h = max(b[1] for b in bands)
-        L.append(_LANDING_SWIPER_EFFECT.replace("useRef(null)", f"useRef{refann}(null)").replace("__W__", str(W)))
+        L.append(_with_oidc_login(_LANDING_SWIPER_EFFECT, oidc_login).replace("useRef(null)", f"useRef{refann}(null)").replace("__W__", str(W)))
         L.append("  return (")
         L.append(f"    <main{main_cls}>")
         L.append(h1_jsx)
@@ -1462,7 +1789,7 @@ def _gen_landing(board, lang, client, stage_rel="../Stage", swiper=False, feats=
         L += ["    </main>", "  );", "}", ""]
     else:
         L.append(f"  const rootRef = useRef{refann}(null);")
-        L.append(_LANDING_EFFECT)
+        L.append(_with_oidc_login(_LANDING_EFFECT, oidc_login))
         L.append("  return (")
         L.append(f'    <main ref={{rootRef}}{main_cls}>')
         L.append(h1_jsx)
@@ -1522,6 +1849,81 @@ def _gen_env(client=False):
     head = ("# Next.js: bien cho client PHAI bat dau NEXT_PUBLIC_\n" if client
             else "# Vite: bien cho client PHAI bat dau VITE_APP_\n")
     return head + "\n".join(f"{_env_key(client, k)}=" for k in _LINK_KEYS) + "\n"
+
+
+def _oidc_env_key(client, key):
+    prefix = "NEXT_PUBLIC_APP_" if client else "VITE_APP_"
+    return prefix + key
+
+
+def _gen_oidc_env(client=False):
+    """Bien moi truong cho preset dang nhap VPlay/OIDC (chi sinh khi opt-in)."""
+    values = {
+        "CLIENT_ID": "",
+        "DOMAIN": "http://localhost:5173" if not client else "http://localhost:3000",
+        "SERVICE_PATH": "",
+        "LOGIN_DOMAIN": "",
+        "REDIRECT_URL": "/callback",
+    }
+    head = "# Cau hinh dang nhap VPlay/OIDC. Khong commit secret vao source.\n"
+    return head + "\n".join(
+        f"{_oidc_env_key(client, key)}={value}" for key, value in values.items()
+    ) + "\n"
+
+
+def _gen_oidc_auth(lang, client=False):
+    """Helper redirect OIDC dung chung cho Vite va Next, khong them dependency."""
+    src = "process.env" if client else "import.meta.env"
+    head = '"use client";\n\n' if client else ""
+    option_type = (
+        "export type LoginOptions = { redirectUrl?: string };\n\n" if lang == "ts" else ""
+    )
+    annotation = ": LoginOptions = {}" if lang == "ts" else " = {}"
+    state_annotation = ": string | null" if lang == "ts" else ""
+    keys = {
+        key: f"{src}.{_oidc_env_key(client, key)}"
+        for key in ("CLIENT_ID", "DOMAIN", "SERVICE_PATH", "LOGIN_DOMAIN", "REDIRECT_URL")
+    }
+    return head + option_type + f'''const CLIENT_ID = {keys["CLIENT_ID"]} || "";
+const APP_DOMAIN = {keys["DOMAIN"]} || "";
+const SERVICE_PATH = {keys["SERVICE_PATH"]} || "";
+const LOGIN_DOMAIN = {keys["LOGIN_DOMAIN"]} || "";
+const DEFAULT_REDIRECT_URL = {keys["REDIRECT_URL"]} || "/callback";
+
+export function handleLogin({{ redirectUrl = DEFAULT_REDIRECT_URL }}{annotation}) {{
+  if (!CLIENT_ID || !APP_DOMAIN || !LOGIN_DOMAIN) {{
+    throw new Error("[OIDC] Thieu CLIENT_ID, DOMAIN hoac LOGIN_DOMAIN trong .env");
+  }}
+  const stateBytes = crypto.getRandomValues(new Uint8Array(32));
+  const state = Array.from(stateBytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  sessionStorage.setItem("oidc_state", state);
+
+  const callbackUrl = [
+    APP_DOMAIN.replace(/\/+$/, ""),
+    SERVICE_PATH.replace(/^\/+|\/+$/g, ""),
+    redirectUrl.replace(/^\/+/, ""),
+  ].filter(Boolean).join("/");
+  const authUrl = new URL("/api-core/v2/oidc-service/oauth2/auth", LOGIN_DOMAIN);
+  authUrl.search = new URLSearchParams({{
+    client_id: CLIENT_ID,
+    protocol: "oauth2",
+    response_type: "code",
+    redirect_uri: callbackUrl,
+    state,
+    prompt: "consent",
+    scope: "api_profile_get",
+  }}).toString();
+  window.location.assign(authUrl.toString());
+}}
+
+export function verifyOidcState(returnedState{state_annotation}) {{
+  const expectedState = sessionStorage.getItem("oidc_state");
+  sessionStorage.removeItem("oidc_state");
+  return Boolean(
+    returnedState && expectedState && returnedState === expectedState
+  );
+}}
+'''
 
 
 # ================= cau hinh du an =================
@@ -1609,9 +2011,14 @@ def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, f
     elif feats.get("popups"):   # checkbox 'Popup mau' khong co PSD -> stub chu
         (base_dir / f"Popups.{ext}").write_text(_gen_popups_stub(lang, client), encoding="utf-8")
     for sec in board["sections"]:
-        (base_dir / f"{sec['comp']}.{ext}").write_text(_gen_section(sec, lang, client), encoding="utf-8")
-        for rp in sec["repeats"]:
-            (base_dir / f"{rp['comp']}.{ext}").write_text(_gen_repeat(rp, lang, client), encoding="utf-8")
+        section_source = (
+            _gen_composite_section(sec, lang, client)
+            if feats.get("composite_hotspots") else _gen_section(sec, lang, client)
+        )
+        (base_dir / f"{sec['comp']}.{ext}").write_text(section_source, encoding="utf-8")
+        if not feats.get("composite_hotspots"):
+            for rp in sec["repeats"]:
+                (base_dir / f"{rp['comp']}.{ext}").write_text(_gen_repeat(rp, lang, client), encoding="utf-8")
     # page composition -> pages_dir (React) hoac chung base_dir (Next)
     pdir = pages_dir if pages_dir is not None else base_dir
     pdir.mkdir(parents=True, exist_ok=True)
@@ -1620,7 +2027,8 @@ def _write_landing_dir(base_dir, board, lang, client, stage_rel, swiper=False, f
                      config_rel=config_rel, comp_base=comp_base), encoding="utf-8")
     if feats.get("fluid"):
         (pdir / f"MobileFluid.{ext}").write_text(
-            _gen_fluid_mobile(board, lang, client, config_rel=config_rel), encoding="utf-8")
+            _gen_fluid_mobile(board, lang, client, config_rel=config_rel,
+                              oidc_login=bool(feats.get("oidc_login"))), encoding="utf-8")
 
 
 def _eslintrc_react(lang):
@@ -1739,7 +2147,10 @@ def _seo_into_board(layout, board):
 
 def _lcp_src(board):
     """Duong dan anh LCP (de preload). None neu khong co."""
-    for it in list(board.get("backgrounds", [])) + [l for s in board.get("sections", [])[:1]
+    sections = board.get("sections", [])
+    if sections and sections[0].get("composite"):
+        return sections[0]["composite"].get("src")
+    for it in list(board.get("backgrounds", [])) + [l for s in sections[:1]
                                                      for l in s.get("flat", [])]:
         if it.get("lcp"):
             return it.get("src")
@@ -1786,8 +2197,18 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
     (src / "constants").mkdir(exist_ok=True)
     (src / "constants" / f"landing.config.{dext}").write_text(
         _gen_config(lang, feats.get("env_config"), client=False), encoding="utf-8")
+    if feats.get("oidc_login"):
+        (src / "utils").mkdir(exist_ok=True)
+        (src / "utils" / f"auth.{dext}").write_text(
+            _gen_oidc_auth(lang, client=False), encoding="utf-8"
+        )
+    env_parts = []
     if feats.get("env_config"):
-        (proj / ".env").write_text(_gen_env(client=False), encoding="utf-8")
+        env_parts.append(_gen_env(client=False))
+    if feats.get("oidc_login"):
+        env_parts.append(_gen_oidc_env(client=False))
+    if env_parts:
+        (proj / ".env").write_text("\n".join(env_parts), encoding="utf-8")
     # styles (css global)
     (src / "styles").mkdir(exist_ok=True)
     (src / "styles" / "index.css").write_text(
@@ -1851,8 +2272,12 @@ def _export_react(out_dir, layout, board, mobile, lang, swiper=False, feats=None
         "scripts": scripts,
         "dependencies": deps, "devDependencies": dev}, indent=2), encoding="utf-8")
     _copy_assets(out_dir, proj, "assets")
+    if feats.get("composite_hotspots"):
+        _write_composite_assets(out_dir, layout, board, proj / "public" / "composite")
     if mobile:
         _copy_assets(mobile["dir"], proj, "assets-m")
+        if feats.get("composite_hotspots"):
+            _write_composite_assets(mobile["dir"], mobile["layout"], mobile["board"], proj / "public" / "composite")
     for p in (popups or []):   # moi popup: assets rieng /assets-<id>
         if p.get("dir"):        # popup noi bo dung chung assets desktop/mobile
             _copy_assets(p["dir"], proj, f"assets-{p['id']}")
@@ -1904,8 +2329,18 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None,
     (proj / "constants").mkdir(exist_ok=True)
     (proj / "constants" / f"landing.config.{dext}").write_text(
         _gen_config(lang, feats.get("env_config"), client=True), encoding="utf-8")
+    if feats.get("oidc_login"):
+        (proj / "lib").mkdir(exist_ok=True)
+        (proj / "lib" / f"auth.{dext}").write_text(
+            _gen_oidc_auth(lang, client=True), encoding="utf-8"
+        )
+    env_parts = []
     if feats.get("env_config"):
-        (proj / ".env").write_text(_gen_env(client=True), encoding="utf-8")
+        env_parts.append(_gen_env(client=True))
+    if feats.get("oidc_login"):
+        env_parts.append(_gen_oidc_env(client=True))
+    if env_parts:
+        (proj / ".env").write_text("\n".join(env_parts), encoding="utf-8")
 
     (proj / "app" / "globals.css").write_text(
         CSS_TW + (FX_CSS if feats.get("_fx_render") else "") + (FX_REVEAL_CSS if feats.get("fx_reveal") else ""),
@@ -1974,8 +2409,12 @@ def _export_next(out_dir, layout, board, mobile, lang, swiper=False, feats=None,
         "dependencies": ndeps,
         "devDependencies": dev}, indent=2), encoding="utf-8")
     _copy_assets(out_dir, proj, "assets")
+    if feats.get("composite_hotspots"):
+        _write_composite_assets(out_dir, layout, board, proj / "public" / "composite")
     if mobile:
         _copy_assets(mobile["dir"], proj, "assets-m")
+        if feats.get("composite_hotspots"):
+            _write_composite_assets(mobile["dir"], mobile["layout"], mobile["board"], proj / "public" / "composite")
     for p in (popups or []):   # moi popup: assets rieng /assets-<id>
         if p.get("dir"):
             _copy_assets(p["dir"], proj, f"assets-{p['id']}")
@@ -1994,6 +2433,12 @@ def _write_readme(proj, board, mobile, run_cmd, lang):
         lines.append(f"  - `{sec['comp']}`" + (f" (cum lap: {reps})" if reps else ""))
     if mobile:
         lines.append("- `components/landing-mobile/` - ban mobile rieng (hien duoi breakpoint md).")
+    if board.get("composite_hotspots"):
+        lines += [
+            "- `public/composite/` - anh section lossless cat tu composite PSD.",
+            "- Moi component section chi gom anh composite va hotspot trong suot; "
+            "sua URL/action trong mang `hotspots` cua component.",
+        ]
     lines += ["", "## Tich hop API",
               "- Cac cum lap render bang `.map()` qua mang `*Data` trong file section - thay bang data BE.",
               "- Nut 'Nhan Qua' goi `onClaim(id)` (sua trong Landing).",
@@ -2110,6 +2555,13 @@ def export(out_dir, framework="react", lang="js", mobile_dir=None, detect_repeat
     if lang not in ("ts", "js"):
         lang = "js"
     feats = dict(feats or {})
+    if feats.get("smart_hybrid"):
+        feats["composite_hotspots"] = True
+    if feats.get("composite_hotspots"):
+        # Composite da responsive theo Stage; cac pass thay doi layer khong con phu hop.
+        feats["fluid"] = False
+        feats["ai_enhance"] = False
+        detect_repeats = False
     # swiper_lib (Swiper.js that) keo theo che do full-page
     if feats.get("swiper_lib"):
         swiper = True
@@ -2140,12 +2592,27 @@ def export(out_dir, framework="react", lang="js", mobile_dir=None, detect_repeat
     if popups:
         feats["popups"] = True   # bat he popup (Landing import + wiring setPopup)
 
+    if feats.get("smart_hybrid"):
+        try:
+            from .ai_hybrid import prepare_hybrid
+            prepare_hybrid(out_dir, layout, board)
+            if mobile:
+                prepare_hybrid(mobile["dir"], mobile["layout"], mobile["board"])
+        except Exception as exc:
+            print(f"[AI hybrid] Bo qua do loi: {exc}")
+    if feats.get("composite_hotspots"):
+        _prepare_composite_board(board, "desktop")
+        if mobile:
+            _prepare_composite_board(mobile["board"], "mobile")
+
     # fx_render: sinh Layer co xu ly fx + kem FX_CSS khi bat AUTO (feats.fx) HOAC co
     # layer nao duoc gan hieu ung TAY (l['fx']) trong editor -> hieu ung tay luon chay.
     def _has_manual_fx(lay):
         return any(l.get("fx") for l in (lay or {}).get("layers", []))
-    feats["_fx_render"] = bool(feats.get("fx") or _has_manual_fx(layout)
-                               or (mobile and _has_manual_fx(mobile["layout"])))
+    feats["_fx_render"] = bool(not feats.get("composite_hotspots") and (
+        feats.get("fx") or _has_manual_fx(layout)
+        or (mobile and _has_manual_fx(mobile["layout"]))
+    ))
 
     proj = _export_next(out_dir, layout, board, mobile, lang, swiper=swiper, feats=feats, popups=popups) \
         if framework == "next" \

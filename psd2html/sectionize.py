@@ -74,6 +74,42 @@ def _sections_from_bands(layout, bands):
     return sections
 
 
+def _bands_from_horizontal_guides(layout, target_h):
+    """
+    Doi horizontal guide cua Photoshop thanh ranh gioi section.
+
+    Bo guide qua sat mep/qua sat guide truoc de tranh nham guide can chu,
+    baseline... la section. Landing dai thuong dat guide section cach nhau
+    hang tram pixel.
+    """
+    canvas_h = int(layout["canvas"]["height"])
+    raw = (layout.get("guides") or {}).get("horizontal") or []
+    try:
+        positions = sorted({
+            int(round(float(y))) for y in raw if 0 < float(y) < canvas_h
+        })
+    except (TypeError, ValueError):
+        return []
+
+    min_section_h = max(240, min(int(target_h) // 3, canvas_h // 12))
+    cuts = [0]
+    for y in positions:
+        if y - cuts[-1] >= min_section_h:
+            cuts.append(y)
+    if len(cuts) == 1:
+        return []
+    if canvas_h - cuts[-1] < min_section_h:
+        cuts.pop()
+    cuts.append(canvas_h)
+    if len(cuts) < 3:
+        return []
+
+    return [
+        {"name": f"Section {i + 1}", "y0": cuts[i], "y1": cuts[i + 1]}
+        for i in range(len(cuts) - 1)
+    ]
+
+
 def split_sections(layout, target_h=1300, min_gap=25, bg_ratio=0.6):
     """
     Tra ve danh sach section, moi section:
@@ -96,6 +132,10 @@ def split_sections(layout, target_h=1300, min_gap=25, bg_ratio=0.6):
     explicit = layout.get("sections")
     if explicit:
         return _sections_from_bands(layout, explicit)
+
+    guide_bands = _bands_from_horizontal_guides(layout, target_h)
+    if guide_bands:
+        return _sections_from_bands(layout, guide_bands)
 
     canvas_h = layout["canvas"]["height"]
     leaves = _leaf_layers(layout)

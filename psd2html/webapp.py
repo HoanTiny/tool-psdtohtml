@@ -35,6 +35,7 @@ from werkzeug.utils import secure_filename
 
 from .parser import parse_psd
 from .merge import parse_and_merge
+from .sectionize import split_sections
 from .render_slices import render as render_slices
 from .export_web import export as export_web
 from .ba_flow import (BAFlowError, SUPPORTED_EXTENSIONS, build_flow_spec,
@@ -262,6 +263,8 @@ def _serialize_job_route(func):
         job_id = data.get("job_id")
         if not job_id:
             return func(*args, **kwargs)
+        if not _safe_job_dir(job_id):
+            return jsonify({"error": "Job khong hop le."}), 400
         lock = _job_lock(job_id)
         if not lock.acquire(blocking=False):
             return _busy_response()
@@ -619,7 +622,23 @@ def _variant_manifest(job_id, vdir, url_prefix, inline_prefix=None):
     base = f"/result/{job_id}/{url_prefix}"
 
     secs = layout.get("sections")
-    if not secs:   # 1 file -> chua chia section -> coi ca trang la 1 section
+    if not secs:
+        # PSD don: uu tien guide ngang do designer dat; neu khong co thi dung
+        # bo tach section theo mat do layer. Chi lay band goc, layer van giu
+        # toa do tuyet doi de editor khong bi lech khi chuyen section.
+        try:
+            detected = split_sections(layout)
+            secs = [
+                {
+                    "name": s.get("name") or f"Section {i + 1}",
+                    "y0": s["y0"],
+                    "y1": s["y1"],
+                }
+                for i, s in enumerate(detected)
+            ]
+        except Exception:
+            secs = None
+    if not secs:
         secs = [{"name": "Trang", "y0": 0, "y1": canvas["height"]}]
 
     def _section_of(cy):
@@ -709,17 +728,22 @@ def _ensure_job(job_id):
     """Tra job trong RAM; neu mat (server restart) nhung du lieu con tren dia
     (output_web/<job>/out/layout.json) thi PHUC HOI lai job -> export/preview/edit
     khong bi 'Job khong ton tai' sau khi restart."""
+    jdir = _safe_job_dir(job_id)
+    if not jdir:
+        return None
     existing = jobs.get(job_id)
     if existing:
         return existing
-    if not job_id or "/" in job_id or "\\" in job_id or ".." in job_id:
-        return None
-    out = JOBS_DIR / job_id / "out"
+    out = jdir / "out"
     if not ((out / "layout.json").exists() or (out / "layout.orig.json").exists()):
         return None
-    job = {"phase": "parse", "status": "done", "step": "San sang chinh sua",
+    completed_export = (jdir / "result.zip").is_file()
+    job = {"phase": "export" if completed_export else "parse", "status": "done",
+           "step": "Hoan tat" if completed_export else "San sang chinh sua",
            "sections": 0, "error": None, "manifest": None,
-           "preview": None, "download": None, "files": []}
+           "preview": None,
+           "download": f"/download/{job_id}" if completed_export else None,
+           "files": []}
     try:
         job["manifest"] = _build_manifest(job_id)
     except Exception:
@@ -1259,7 +1283,10 @@ def export():
 
     swiper = _flag(data.get("swiper"))
     feats = {"swiper_lib": _flag(data.get("swiper_lib")), "popups": _flag(data.get("popups")),
+             "composite_hotspots": fmt in ("react", "next") and _flag(data.get("composite_hotspots")),
+             "smart_hybrid": fmt in ("react", "next") and _flag(data.get("smart_hybrid")),
              "env_config": _flag(data.get("env_config")), "nav_menu": _flag(data.get("nav_menu")),
+             "oidc_login": _flag(data.get("oidc_login")),
              "ai_enhance": _flag(data.get("ai_enhance")), "fluid": _flag(data.get("fluid")),
              "fx": _flag(data.get("fx")), "fx_reveal": _flag(data.get("fx_reveal"))}
     disabled_d = data.get("disabled_desktop") or []
@@ -1299,12 +1326,27 @@ def build_preview():
 
 
 def _variant_dir(job_id, variant):
-    out = JOBS_DIR / job_id / "out"
+    jdir = _safe_job_dir(job_id)
+    if not jdir:
+        return None
+    out = jdir / "out"
+    if variant in (None, "", "desktop"):
+        return out
     if variant == "mobile":
         return out / "_mobile"
     if isinstance(variant, str) and variant.startswith("popup:"):
-        return out / "_popups" / variant.split(":", 1)[1]
-    return out
+        popup_id = variant.split(":", 1)[1]
+        if not popup_id or not all(c.isalnum() or c in "-_" for c in popup_id):
+            return None
+        popup_root = out / "_popups"
+        candidate = popup_root / popup_id
+        try:
+            if candidate.resolve().parent != popup_root.resolve():
+                return None
+        except OSError:
+            return None
+        return candidate
+    return None
 
 
 @app.route("/group", methods=["POST"])
@@ -1318,7 +1360,7 @@ def group():
     name = (data.get("name") or "Group").strip()[:40]
     job = _ensure_job(job_id)
     vdir = _variant_dir(job_id, variant)
-    if not job or not (vdir / "layout.json").exists():
+    if not job or not vdir or not (vdir / "layout.json").exists():
         return jsonify({"error": "Chua co du lieu parse."}), 400
     if len(members) < 2:
         return jsonify({"error": "Chon it nhat 2 anh de gop."}), 400
@@ -1350,7 +1392,7 @@ def ungroup():
     gid = data.get("group_id")
     job = _ensure_job(job_id)
     vdir = _variant_dir(job_id, variant)
-    if not job or not (vdir / "layout.json").exists():
+    if not job or not vdir or not (vdir / "layout.json").exists():
         return jsonify({"error": "Chua co du lieu parse."}), 400
     groups = [g for g in _load_groups(vdir) if g["id"] != gid]
     _save_groups(vdir, groups)
@@ -1374,7 +1416,7 @@ def edit():
     variant = data.get("variant", "desktop")
     job = _ensure_job(job_id)
     vdir = _variant_dir(job_id, variant)
-    if not job or not (vdir / "layout.json").exists():
+    if not job or not vdir or not (vdir / "layout.json").exists():
         return jsonify({"error": "Chua co du lieu parse."}), 400
     patch = data.get("patch") or {}       # {layerId: {bbox?/z?/text?/link?/alt?}}
     with _EDIT_LOCK:                       # tuan tu hoa read-modify-write edits.json
@@ -1623,7 +1665,10 @@ def cleanup_jobs():
 
 @app.route("/result/<job_id>/<path:filename>")
 def result(job_id, filename):
-    d = JOBS_DIR / job_id / "out"
+    jdir = _safe_job_dir(job_id)
+    if not jdir:
+        abort(404)
+    d = jdir / "out"
     if not d.exists():
         abort(404)
     return send_from_directory(d, filename)
@@ -1631,7 +1676,10 @@ def result(job_id, filename):
 
 @app.route("/download/<job_id>")
 def download(job_id):
-    z = JOBS_DIR / job_id / "result.zip"
+    jdir = _safe_job_dir(job_id)
+    if not jdir:
+        abort(404)
+    z = jdir / "result.zip"
     if not z.exists():
         abort(404)
     return send_file(z, as_attachment=True,
